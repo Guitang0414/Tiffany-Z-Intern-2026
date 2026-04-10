@@ -8,23 +8,22 @@
 
 ```mermaid
 graph TB
-    subgraph sandbox["🔒 Agent Sandbox (独立 Docker / VPS)"]
-        OC["OpenClaw Agent"]
-        PW["Playwright<br/>(无头浏览器)"]
+    subgraph sandbox["🔒 Agent Sandbox (Hetzner VPS 隔离容器)"]
+        OC["Hermes Agent"]
         Claude["Claude API"]
     end
 
-    subgraph core["☁️ Core Backend (GCP Cloud Run)"]
+    subgraph core["☁️ Core Backend (Hetzner VPS / Dokploy)"]
         API["FastAPI Server"]
         Auth["JWT Auth<br/>Middleware"]
         Dist["Distribution<br/>Service"]
     end
 
-    subgraph db["💾 Database (Cloud SQL)"]
+    subgraph db["💾 Database (PostgreSQL)"]
         PG[("PostgreSQL")]
     end
 
-    subgraph frontend["🖥️ Frontend (Vercel)"]
+    subgraph frontend["🖥️ Frontend (Dokploy)"]
         UI["React + Vite<br/>Dashboard"]
     end
 
@@ -41,8 +40,7 @@ graph TB
     end
 
     %% Agent 层数据流
-    NS1 & NS2 & NS3 -->|"抓取"| PW
-    PW -->|"原始内容"| OC
+    NS1 & NS2 & NS3 -->|"抓取"| OC
     OC -->|"改写请求"| Claude
     Claude -->|"改写结果"| OC
     OC -->|"Webhook POST<br/>(X-Agent-Key)"| API
@@ -72,9 +70,9 @@ graph TB
 
 ### 架构要点
 
-1. **Agent 层物理隔离：** Agent 运行在独立的沙盒容器中，仅通过 HTTP Webhook 与核心后端通信，无法直连数据库
+1. **Agent 层物理隔离：** Agent 运行在 Hetzner VPS 的隔离容器中，仅通过 HTTP Webhook 与核心后端通信，无法直连数据库
 2. **核心后端集中处理：** FastAPI 作为唯一的数据入口和出口，统一管理认证、业务逻辑和第三方分发
-3. **前端静态部署：** React SPA 部署在 CDN，零后端依赖，通过 HTTPS 调用 API
+3. **前端部署：** React SPA 通过 Dokploy 部署，通过 HTTPS 调用 API
 4. **分发层解耦：** WordPress 和 Twitter 的分发相互独立，单个失败不影响另一个
 
 ---
@@ -84,7 +82,7 @@ graph TB
 ```mermaid
 sequenceDiagram
     participant NS as 📰 新闻源
-    participant Agent as 🤖 OpenClaw Agent
+    participant Agent as 🤖 Hermes Agent
     participant Claude as 🧠 Claude API
     participant TG as 💬 Telegram
     participant API as ⚙️ FastAPI
@@ -227,46 +225,39 @@ graph LR
         NewsWeb["新闻网站"]
     end
 
-    subgraph cdn["CDN / Static Hosting"]
-        Vercel["Vercel<br/>React SPA"]
-    end
-
-    subgraph gcp["☁️ GCP"]
-        subgraph cloudrun["Cloud Run"]
+    subgraph hetzner["☁️ Hetzner VPS (5.78.203.102) — Dokploy"]
+        subgraph frontend_deploy["Frontend"]
+            ReactSPA["React SPA"]
+        end
+        subgraph backend_deploy["Backend"]
             FastAPI["FastAPI<br/>Container"]
         end
-        subgraph cloudsql["Cloud SQL"]
+        subgraph db_deploy["Database"]
             PG[("PostgreSQL")]
         end
-        FastAPI -->|"内网连接"| PG
-    end
-
-    subgraph sandbox["🔒 Agent VPS"]
-        Docker["Docker Container"]
-        subgraph container["受限容器"]
-            Agent["OpenClaw"]
-            Browser["Playwright"]
+        subgraph agent_deploy["🔒 Agent (隔离容器)"]
+            Agent["Hermes Agent"]
         end
+        FastAPI -->|"内部连接"| PG
     end
 
-    Editor -->|"HTTPS"| Vercel
-    Vercel -->|"API calls"| FastAPI
+    Editor -->|"HTTPS"| ReactSPA
+    ReactSPA -->|"API calls"| FastAPI
     Agent -->|"Webhook HTTPS"| FastAPI
-    Browser -->|"HTTP/HTTPS"| NewsWeb
+    Agent -->|"HTTP/HTTPS"| NewsWeb
 
-    style sandbox fill:#fff3e0,stroke:#e65100,stroke-width:2px
-    style gcp fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
-    style cdn fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style hetzner fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    style agent_deploy fill:#fff3e0,stroke:#e65100,stroke-width:2px
 ```
 
 ### 部署细节
 
 | 组件 | 平台 | 配置 |
 | :--- | :--- | :--- |
-| FastAPI | GCP Cloud Run | min 0 / max 3 实例，1 vCPU + 512MB |
-| PostgreSQL | GCP Cloud SQL | db-f1-micro (开发)，按需升配 |
-| React Frontend | Vercel | 自动 CI/CD，绑定 GitHub 仓库 |
-| OpenClaw Agent | 独立 VPS | 2 vCPU + 2GB RAM，Docker 受限容器 |
+| FastAPI | Hetzner VPS (Dokploy) | 容器化部署 |
+| PostgreSQL | Hetzner VPS (Dokploy) | 本地数据库实例 |
+| React Frontend | Hetzner VPS (Dokploy) | 自动 CI/CD，绑定 GitHub 仓库 |
+| Hermes Agent | Hetzner VPS (Dokploy 隔离容器) | 受限环境运行 |
 
 ---
 
@@ -275,7 +266,7 @@ graph LR
 ```mermaid
 graph TB
     subgraph trust_none["❌ Zero Trust Zone"]
-        Agent["OpenClaw Agent"]
+        Agent["Hermes Agent"]
     end
 
     subgraph trust_low["⚠️ Low Trust Zone"]

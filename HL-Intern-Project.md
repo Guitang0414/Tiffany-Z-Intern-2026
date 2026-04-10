@@ -9,7 +9,7 @@
 
 ### 1.1 核心业务流程
 
-1. **自动抓取与重写 (Agent Layer):** OpenClaw 智能体定时唤醒，控制无头浏览器抓取目标新闻源，调用 Claude API 将核心事实改写为头条风格。
+1. **自动抓取与重写 (Agent Layer):** Hermes Agent 智能体定时唤醒，控制浏览器抓取目标新闻源，调用 Claude API 将核心事实改写为头条风格。
 2. **状态汇聚与通知 (API & Notification Layer):** Agent 将改写后的数据通过 Webhook 推送至后端入库（状态：`PENDING`），并通过 Telegram Bot 向编辑群组发送通知。
 3. **集中审核 (Frontend Pool):** 编辑登录前端工作台，查看待审列表，校对原文，修改 AI 生成的内容，并进行审批或驳回。
 4. **一键分发 (Distribution Layer):** 审批通过后，后端自动调用 WordPress REST API 创建排版好的文章，并调用 Twitter API 发布带链接的简讯。
@@ -37,7 +37,7 @@
 
 | 模块 | 技术栈 | 选型理由 |
 | :--- | :--- | :--- |
-| **Agent 层** | OpenClaw + Playwright (无头浏览器) | 自主智能体替代传统爬虫，Playwright 反爬能力强 |
+| **Agent 层** | Hermes Agent | 自主智能体替代传统爬虫，浏览器自动化反爬能力强 |
 | **核心后端** | Python 3.12 + FastAPI | 异步高性能，生态丰富，Claude SDK 原生支持 |
 | **ORM** | SQLAlchemy 2.0 + Alembic | 成熟稳定，Alembic 管理数据库迁移 |
 | **数据库** | PostgreSQL 16 | 稳定可靠，支持 UUID、JSONB 等高级特性 |
@@ -47,7 +47,7 @@
 | **前端认证** | JWT (access + refresh token) | 简洁，适合内部系统 |
 | **通讯** | Telegram Bot API | 编辑群组实时通知 |
 | **分发** | WordPress REST API, Twitter API v2 | 官方 API，稳定可靠 |
-| **部署** | Docker Compose (开发) / GCP Cloud Run (生产) | 容器化标准部署 |
+| **部署** | Dokploy on Hetzner VPS (5.78.203.102) | 统一部署与 CI/CD 管理 |
 
 ---
 
@@ -59,9 +59,9 @@
 
 | 层级 | 部署位置 | 隔离策略 |
 | :--- | :--- | :--- |
-| Agent 层 | 独立 Docker 容器 / 独立 VPS | **严禁直连数据库**，仅通过 Webhook API 通信 |
-| 核心后端 + DB | GCP Cloud Run + Cloud SQL | 内网通信，外部仅暴露 API Gateway |
-| 前端 | Vercel / Cloudflare Pages | 静态部署，通过 HTTPS 调用后端 API |
+| Agent 层 | Hetzner VPS 隔离容器 | **严禁直连数据库**，仅通过 Webhook API 通信 |
+| 核心后端 + DB | Hetzner VPS (Dokploy 管理) | 内部通信，外部仅暴露 API Gateway |
+| 前端 | Hetzner VPS (Dokploy 管理) | 通过 HTTPS 调用后端 API |
 
 ---
 
@@ -165,9 +165,9 @@ REJECTED → PENDING     (重新提交审核，可选)
 
 ### 6.3 Agent 沙盒隔离
 
-- Agent 运行在受限 Docker 容器中，仅允许出站 HTTP/HTTPS 流量
+- Agent 运行在 Hetzner VPS 的隔离环境中，仅允许出站 HTTP/HTTPS 流量
 - 严禁 Agent 直连数据库或访问内部服务
-- Agent 的凭证（API Key、Claude API Key）通过 Docker secrets 或环境变量注入
+- Agent 的凭证（API Key、Claude API Key）通过环境变量注入
 
 ### 6.4 通用安全措施
 
@@ -203,7 +203,7 @@ REJECTED → PENDING     (重新提交审核，可选)
 | :--- | :--- |
 | 目标网站结构变更 | Agent 发送 Telegram 告警，人工介入调整 |
 | Claude API 调用失败 | 指数退避重试 3 次，仍失败则跳过并记录 |
-| Agent 进程崩溃 | Docker restart policy: `on-failure`，自动重启 |
+| Agent 进程崩溃 | Dokploy 自动重启策略 |
 
 ---
 
@@ -213,8 +213,8 @@ REJECTED → PENDING     (重新提交审核，可选)
 
 | Task | 描述 | Definition of Done |
 | :--- | :--- | :--- |
-| 1.1 | 搭建 OpenClaw 运行环境与 Playwright 无头浏览器 | Agent 能在 Docker 容器内启动并成功打开目标网站 |
-| 1.2 | 编写 `SOUL.md`（采编人设 + Claude 提示词）和 `HEARTBEAT.md`（定时巡视逻辑） | Agent 能自主发现至少 1 个目标源的最新新闻并完成 AI 改写 |
+| 1.1 | 搭建 Hermes Agent 运行环境 | Agent 能启动并成功打开目标网站 |
+| 1.2 | 编写采编提示词与定时巡视逻辑 | Agent 能自主发现至少 1 个目标源的最新新闻并完成 AI 改写 |
 | 1.3 | 配置 Telegram Bot，跑通基础循环 | Agent 完成"发现新闻 → Claude 改写 → Telegram 群发送结构化消息"，至少成功执行 3 次 |
 
 ### Week 2: 搭建中枢神经 (后端 API 与 DB)
@@ -239,7 +239,7 @@ REJECTED → PENDING     (重新提交审核，可选)
 | :--- | :--- | :--- |
 | 4.1 | 集成 WordPress REST API | 审批通过后自动在 WP 创建文章，包含标题、正文和来源标注，`wp_post_id` 回写数据库 |
 | 4.2 | 集成 Twitter API v2 | WP 文章发布后自动发推（标题 + 链接），`tweet_id` 回写数据库 |
-| 4.3 | 全链路测试 + 部署 | 全链路（Agent → Pool → WP/Twitter）至少完成 5 条新闻的端到端测试；Docker Compose 一键启动所有服务 |
+| 4.3 | 全链路测试 + 部署 | 全链路（Agent → Pool → WP/Twitter）至少完成 5 条新闻的端到端测试；Dokploy 一键部署所有服务 |
 
 ---
 
@@ -259,11 +259,18 @@ REJECTED → PENDING     (重新提交审核，可选)
 
 | 风险 | 影响 | 缓解措施 |
 | :--- | :--- | :--- |
-| OpenClaw 稳定性未知 | Agent 层不可用 | Week 1 充分测试；备选方案：降级为 Playwright 脚本 + cron |
-| 目标新闻源反爬升级 | 抓取失败率上升 | Playwright 模拟真实浏览器行为；设置多个备用新闻源 |
+| Hermes Agent 稳定性未知 | Agent 层不可用 | Week 1 充分测试；备选方案：降级为 Playwright 脚本 + cron |
+| 目标新闻源反爬升级 | 抓取失败率上升 | Hermes Agent 模拟真实浏览器行为；设置多个备用新闻源 |
 | Claude API rate limit / 成本 | 改写延迟或超出预算 | 设置每日调用上限；缓存已改写内容；评估使用 Haiku 降低成本 |
 | Twitter API 审核周期 | Week 4 可能拿不到 API 权限 | Week 1 提前申请；备选：先支持 WP，Twitter 作为 P1 后续迭代 |
 | WordPress 插件/主题兼容性 | 文章排版异常 | 使用 WP REST API 标准字段；提前在测试站验证 |
+
+### 10.1 依赖
+
+| 依赖 | 说明 |
+| :--- | :--- |
+| Hetzner VPS | 服务器 IP: 5.78.203.102 |
+| Dokploy | 部署与 CI/CD 管理平台 |
 
 ---
 
@@ -283,10 +290,9 @@ REJECTED → PENDING     (重新提交审核，可选)
 
 | # | 链接 | 主题 | 说明 |
 | :--- | :--- | :--- | :--- |
-| 1 | [@0xkevinhe](https://x.com/0xkevinhe/status/2025781752971809010) | Agent 访问 Twitter | Agent 通过自主操控浏览器访问 Twitter 获取内容的实践参考 |
-| 2 | [@gkxspace](https://x.com/gkxspace/status/2025861476439695777) | Agent 访问 Web | Agent 自主浏览网页、提取信息的技术方案参考 |
-| 3 | [@hasantoxr](https://x.com/hasantoxr/status/2025902150296236050) | OpenClaw 爬虫实践 | 使用 OpenClaw 进行网页爬取的具体实现案例 |
-| 4 | [@GoSailGlobal](https://x.com/GoSailGlobal/status/2023945258896351644) | OpenClaw 安装指南 | OpenClaw 环境搭建与安装的详细步骤 |
+| 1 | [@Will_Yang_](https://x.com/Will_Yang_/status/2041507883876233312) | Hermes Agent 参考 | Hermes Agent 使用参考 |
+| 2 | [@0xkevinhe](https://x.com/0xkevinhe/status/2025781752971809010) | Agent 访问 Twitter | Agent 通过自主操控浏览器访问 Twitter 获取内容的实践参考 |
+| 3 | [@gkxspace](https://x.com/gkxspace/status/2025861476439695777) | Agent 访问 Web | Agent 自主浏览网页、提取信息的技术方案参考 |
 
 ---
 
