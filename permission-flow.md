@@ -13,7 +13,7 @@
 
   * View
  
-    * View available article list assigned by admin
+    * View available articles from assigned categories
    
     * View article details
     
