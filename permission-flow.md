@@ -145,13 +145,10 @@ After an editor claims an article, the system opens the editing workspace.
 The editing page may include:
 - Editable article title
 - Editable article content
-- Category dropdown selection
 - Content type dropdown selection
 - Save Draft button
 - Publish button
 - Reject button
-
-Editors can modify article content before publishing.
 
 ---
 
