@@ -60,6 +60,16 @@
  Backend updates article status and triggers distribution workflow
   ```
 # Database relationship
+## 1. Users
+| Field Name | Type | Constraints | Description |
+|---|---|---|---|
+| id | UUID | Primary key | Unique user ID. |
+| username | VARCHAR(50) | NOT NULL | User display name shown in the dashboard after login. |
+| email | VARCHAR(255) | NOT NULL, UNIQUE | User email address used for login. Must be unique. |
+| password_hash | TEXT | NOT NULL | Hashed user password. Plain passwords are never stored. |
+| role | ENUM | NOT NULL | Allowed values: `ADMIN`, `EDITOR`. Controls user permissions in the system. |
+| created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Time when the user account was created. |
+| updated_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Time when the user account was last updated. |
 # API actions
 # Frontend behavior
 
