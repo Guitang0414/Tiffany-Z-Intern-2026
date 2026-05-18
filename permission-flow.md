@@ -148,8 +148,8 @@ Foreign Keys:
 | id | UUID | NOT NULL | Unique article ID |
 | category_id | UUID | NOT NULL | the category that the article belongs to. Reference to categories.id |
 | source_url | TEXT | NOT NULL, UNIQUE | Original source url, have to be unique and can be used to remove duplicate |
-| status | ENUM | NOT NULL, Default `Pending` | Current Workflow status of the article. Allowed values: `PENDING`, `REJECTED`, `PUBLISHING`, `PUBLISHED`, `FAILED`  |
-| claimed_by | UUID |  | editor that the article was claimed to. Reference to users.id |
+| status | ENUM | NOT NULL, Default `PENDING` | Current Workflow status of the article. Allowed values: `PENDING`, `REJECTED`, `PUBLISHING`, `PUBLISHED`, `FAILED`  |
+| claimed_by | UUID |  | Editor who claimed the article. Reference to users.id |
 | claimed_at | TIMESTAMPTZ |  | Time when editor claimed the article |
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Time when the article was crawled by agent |
 
@@ -159,7 +159,6 @@ Primary Key:
 Foreign Keys:
 - category_id → categories.id
 - claimed_by → users.id
-- current_version_id → article_versions.id
 
 Article Status Rules:
 - `PENDING`: Article is waiting for editor action or still being edited. Draft saves do not change this status
@@ -169,7 +168,7 @@ Article Status Rules:
 - `FAILED`: Publishing failed on one or more external platforms
 
 Article Creation Rule:
-When an article is created, the backend must create the article row and the initial `SOURCE` version with `version_number = 0` in the same database transaction. If the initial version creation fails, the article creation should be rolled back.
+When an article is created, the backend must create the article row and the initial `SOURCE` version with `version_num = 0` in the same database transaction. If the initial version creation fails, the article creation should be rolled back.
 
 ## 5. article_versions
 
