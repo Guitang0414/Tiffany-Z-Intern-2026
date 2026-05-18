@@ -36,24 +36,23 @@
   * Retry failed publishing tasks
  
 * Hermes Agent:
+  
+### Responsibilities
 
-  * Crawl articles from configured news sources
+- Crawl articles from configured news sources
+- Apply keyword / semantic filtering
+- Call Claude API for article rewriting
+- Submit structured article data to Backend webhook
 
-  * Apply keyword / semantic filtering for category matching
+### Security
 
-  * Call Claude API to rewrite article title and content
+- Include API key or request signature in webhook requests
 
-  * Submit structured article data to Backend through secured webhook
+### Reliability
 
-  * Include API key or signature in webhook request
-
-  * Retry temporary crawl / parsing / AI API / webhook failures
-
-  * Log failed tasks and skip unrecoverable articles
-
-  * Does not access frontend dashboard
-
-  * Does not directly access database
+- Retry temporary crawl / parsing / AI API / webhook failures
+- Log failed tasks
+- Skip unrecoverable articles after retry limit
 
     
 # Interaction flows
