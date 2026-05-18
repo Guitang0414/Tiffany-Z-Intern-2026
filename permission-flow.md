@@ -34,8 +34,9 @@
   * Reject Articles
  
   * Retry failed publishing tasks
+# Interaction flows
     
-# Editor Interaction flow
+## Editor Interaction flow
   ```text
  Editor logs in
          ↓
@@ -59,7 +60,7 @@
          ↓
  Backend updates article status and triggers distribution workflow
   ```
-# Article Versioning and Publishing Workflow
+## Article Versioning and Publishing Workflow
   ```text
  Agent crawls article
          ↓
@@ -91,6 +92,20 @@
          ↓
  Success → Article status = `PUBLISHED`
  Failure → Article status = `FAILED` 
+  ```
+## retry flow
+  ```text
+ Publish attempt
+ ↓
+ Create publish_logs row
+ ↓
+ If failed
+ ↓
+ Frontend shows FAILED
+ ↓
+ Editor/Admin clicks retry
+ ↓
+ Create another publish_logs row
   ```
 # Database relationship
 ## 1. Users
@@ -152,6 +167,9 @@ Foreign Keys:
 | claimed_by | UUID |  | Editor who claimed the article. Reference to users.id |
 | claimed_at | TIMESTAMPTZ |  | Time when editor claimed the article |
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Time when the article was crawled by agent |
+| rejection_reason | TEXT | | Reason why editor rejected this article |
+| rejected_by | UUID | | Editor who rejected this article. Reference to users.id |
+| rejected_at | TIMESTAMPTZ | | Time when editor rejected this article |
 
 Primary Key:
 (id)
@@ -159,6 +177,7 @@ Primary Key:
 Foreign Keys:
 - category_id → categories.id
 - claimed_by → users.id
+- rejected_by → users.id
 
 Article Status Rules:
 - `PENDING`: Article is waiting for editor action or still being edited. Draft saves do not change this status
@@ -187,6 +206,36 @@ Unique Constraints:
 
 Foreign Keys:
 - article_id → articles.id
+
+## 6. Publish Logs
+
+Stores publishing attempt history and external platform publishing results.
+
+| Field Name | Type | Constraints | Description |
+|---|---|---|---|
+| id | UUID | NOT NULL | Unique publish log ID |
+| article_id | UUID | NOT NULL | Reference to articles.id |
+| platform | ENUM | NOT NULL | Target publishing platform (`WORDPRESS`, `TWITTER`) |
+| status | ENUM | NOT NULL | Publishing result (`SUCCESS`, `FAILED`) |
+| external_url | TEXT |  | Published article/post URL if successful |
+| error_message | TEXT |  | Failure reason returned by external platform |
+| created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Time of the publishing attempt |
+
+Primary Key:
+```text
+(id)
+```
+
+Foreign Keys:
+```text
+article_id → articles.id
+```
+
+Purpose:
+- Track publishing history
+- Store publishing failure reasons
+- Support retry workflow
+- Record external published URLs
 
 # API actions
 # Frontend behavior
