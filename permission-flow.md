@@ -59,20 +59,55 @@
          ↓
  Backend updates article status and triggers distribution workflow
   ```
+# Article Versioning and Publishing Workflow
+  ```text
+ Agent crawls article
+         ↓
+ Backend creates article row
+         ↓
+ Backend creates version 0 (`SOURCE`)
+         ↓
+ AI rewrites source content
+         ↓
+ Backend creates version 1 (`AI_REWRITE`)
+         ↓
+ Article status = `PENDING`
+         ↓
+ Editor claims article
+         ↓
+ Editor edits content based on latest version
+         ↓
+ [Optional] Editor saves draft
+         ↓
+ [Optional] Backend creates new `DRAFT` version
+         ↓
+ Editor clicks Publish
+         ↓
+ Backend creates new `FINAL` version
+         ↓
+ Article status = `PUBLISHING`
+         ↓
+ Backend publishes FINAL version to external platforms
+         ↓
+ Success → Article status = `PUBLISHED`
+ Failure → Article status = `FAILED` 
+  ```
 # Database relationship
 ## 1. Users
 | Field Name | Type | Constraints | Description |
 |---|---|---|---|
-| id | UUID | Primary key | Unique user ID |
+| id | UUID | NOT NULL | Unique user ID |
 | username | VARCHAR(50) | NOT NULL | User display name shown in the dashboard after login |
 | email | VARCHAR(255) | NOT NULL, UNIQUE | User email address used for login. Must be unique |
 | password_hash | TEXT | NOT NULL | Hashed user password. Plain passwords are never stored |
 | role | ENUM | NOT NULL | Allowed values: `ADMIN`, `EDITOR`. Controls user permissions in the system |
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Time when the user account was created |
-| updated_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Time when the user account was last updated |
+| updated_at | TIMESTAMPTZ |  | Time when the user account was last updated |
+
+Primary Key:
+(id)
 
 ## 2. User_Categories
-
 
 | Field Name | Type | Constraints | Description |
 |---|---|---|---|
@@ -84,6 +119,75 @@ Primary Key (user_id, category_id)
 Foreign Keys:
 - user_id -> users.id
 - category_id -> categories.id
+
+## 3. Categories
+
+| Field Name | Type | Constraints | Description |
+|---|---|---|---|
+| id | UUID | NOT NULL | Unique category ID |
+| name | VARCHAR(50) | NOT NULL, UNIQUE | Category name assigned to articles and editors |
+| description | TEXT | | Optional description of the category |
+| is_active | Boolean | NOT NULL, Default True | Decides whether the category is active or archieved |
+| color | VARCHAR(20) |  | Color used for category tags in the dashboard UI |
+| created_by | UUID | NOT NULL | Admin user ID that created the category |
+| updated_by | UUID |  | Admin user ID that last updated the category |
+| created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Time when the category was created |
+| updated_at | TIMESTAMPTZ |  | Time when the category was last updated |
+
+Primary Key:
+(id)
+
+Foreign Keys:
+- created_by → users.id
+- updated_by → users.id
+
+## 4. Articles
+
+| Field Name | Type | Constraints | Description |
+|---|---|---|---|
+| id | UUID | NOT NULL | Unique article ID |
+| category_id | UUID | NOT NULL | the category that the article belongs to. Reference to categories.id |
+| source_url | TEXT | NOT NULL, UNIQUE | Original source url, have to be unique and can be used to remove duplicate |
+| status | ENUM | NOT NULL, Default `Pending` | Current Workflow status of the article. Allowed values: `PENDING`, `REJECTED`, `PUBLISHING`, `PUBLISHED`, `FAILED`  |
+| claimed_by | UUID |  | editor that the article was claimed to. Reference to users.id |
+| claimed_at | TIMESTAMPTZ |  | Time when editor claimed the article |
+| created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Time when the article was crawled by agent |
+
+Primary Key:
+(id)
+
+Foreign Keys:
+- category_id → categories.id
+- claimed_by → users.id
+- current_version_id → article_versions.id
+
+Article Status Rules:
+- `PENDING`: Article is waiting for editor action or still being edited. Draft saves do not change this status
+- `REJECTED`: Article was rejected by an editor
+- `PUBLISHING`: Article is being published to external platforms
+- `PUBLISHED`: Article was successfully published on external platforms
+- `FAILED`: Publishing failed on one or more external platforms
+
+Article Creation Rule:
+When an article is created, the backend must create the article row and the initial `SOURCE` version with `version_number = 0` in the same database transaction. If the initial version creation fails, the article creation should be rolled back.
+
+## 5. article_versions
+
+| Field Name | Type | Constraints | Description |
+|---|---|---|---|
+| id | UUID | PRIMARY KEY, NOT NULL | Unique article version ID |
+| article_id | UUID | NOT NULL | Reference to articles.id |
+| version_num | INTEGER | NOT NULL | Article version number |
+| title | TEXT | NOT NULL | News title of this version |
+| content | TEXT | NOT NULL | News content of this version |
+| created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Time when this article version was created |
+| version_type | ENUM | NOT NULL, DEFAULT `SOURCE` | Allowed values: `SOURCE`, `AI_REWRITE`, `DRAFT`, `FINAL` |
+
+Unique Constraints:
+- (article_id, version_num)
+
+Foreign Keys:
+- article_id → articles.id
 
 # API actions
 # Frontend behavior
