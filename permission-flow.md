@@ -34,8 +34,54 @@
   * Reject Articles
  
   * Retry failed publishing tasks
-# Interaction flows
+ 
+* Hermes Agent:
+
+  * Crawl articles from configured news sources
+
+  * Apply keyword / semantic filtering for category matching
+
+  * Call Claude API to rewrite article title and content
+
+  * Submit structured article data to Backend through secured webhook
+
+  * Include API key or signature in webhook request
+
+  * Retry temporary crawl / parsing / AI API / webhook failures
+
+  * Log failed tasks and skip unrecoverable articles
+
+  * Does not access frontend dashboard
+
+  * Does not directly access database
+
     
+# Interaction flows
+## System Interaction flow  
+
+## Agent Processing Flow
+
+```text
+ Scheduler
+     ↓ Trigger crawl task
+ Hermes Agent
+     ↓ Crawl configured news sources
+ News Websites
+     ↓ Raw article data
+ Hermes Agent
+     ↓ Filter by keywords / semantic relevance
+ Hermes Agent
+     ↓ API request
+ Claude API
+     ↓ AI rewritten title/content
+ Hermes Agent
+     ↓ Secured Webhook POST /agent/articles
+ Backend API
+```
+
+## Publishing Flow
+
+
 ## Editor Interaction flow
   ```text
  Editor logs in
@@ -182,6 +228,7 @@ Purpose:
 | category_id | UUID | NOT NULL | the category that the article belongs to. Reference to categories.id |
 | source_url | TEXT | NOT NULL, UNIQUE | Original source url, have to be unique and can be used to remove duplicate |
 | status | ENUM | NOT NULL, Default `PENDING` | Current Workflow status of the article. Allowed values: `PENDING`, `REJECTED`, `PUBLISHING`, `PUBLISHED`, `FAILED`  |
+| content_type | ENUM | NOT NULL, Default `ARTICLE` | Content type of the article, deciding the publishing pathway. Allowed values: `ARTICLE`, `SHORT`  |
 | claimed_by | UUID |  | Editor who claimed the article. Reference to users.id |
 | claimed_at | TIMESTAMPTZ |  | Time when editor claimed the article |
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Time when the article was crawled by agent |
@@ -279,7 +326,7 @@ Purpose:
 - Support retry workflow
 - Record external published URLs
 
-# API actions
+# API Interface Overview
 # Frontend behavior
 
 ## Sidebar Navigation
