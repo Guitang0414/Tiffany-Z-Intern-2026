@@ -122,7 +122,10 @@
 Primary Key:
 (id)
 
+
 ## 2. User_Categories
+
+Stores category assignments for users, mainly used to control which article categories each editor can access.
 
 | Field Name | Type | Constraints | Description |
 |---|---|---|---|
@@ -135,6 +138,14 @@ Foreign Keys:
 - user_id -> users.id
 - category_id -> categories.id
 
+
+Purpose:
+```text
+Support many-to-many relationship between users and categories
+Allow admins to assign editors to specific categories
+Control which articles each editor can view and claim
+```
+
 ## 3. Categories
 
 | Field Name | Type | Constraints | Description |
@@ -142,7 +153,7 @@ Foreign Keys:
 | id | UUID | NOT NULL | Unique category ID |
 | name | VARCHAR(50) | NOT NULL, UNIQUE | Category name assigned to articles and editors |
 | description | TEXT | | Optional description of the category |
-| is_active | Boolean | NOT NULL, Default True | Decides whether the category is active or archieved |
+| is_active | Boolean | NOT NULL, Default True | Decides whether the category is active or archived |
 | color | VARCHAR(20) |  | Color used for category tags in the dashboard UI |
 | created_by | UUID | NOT NULL | Admin user ID that created the category |
 | updated_by | UUID |  | Admin user ID that last updated the category |
@@ -155,6 +166,13 @@ Primary Key:
 Foreign Keys:
 - created_by → users.id
 - updated_by → users.id
+
+Purpose:
+- Store article category metadata
+- Organize articles by category
+- Control editor category access
+- Support category management in admin dashboard
+- Provide UI display information for category tags
 
 ## 4. Articles
 
@@ -189,7 +207,18 @@ Article Status Rules:
 Article Creation Rule:
 When an article is created, the backend must create the article row and the initial `SOURCE` version with `version_num = 0` in the same database transaction. If the initial version creation fails, the article creation should be rolled back.
 
+Claim Rule:
+An article can only be claimed by one editor at a time. Once claimed, other editors cannot edit the same article unless the article is released or reassigned.
+
+Purpose:
+- Store article workflow state
+- Manage article ownership and editor assignment
+- Track article rejection status
+- Link article to its content version history
+
 ## 5. article_versions
+
+Stores article content history and tracks different stages of article editing workflow.
 
 | Field Name | Type | Constraints | Description |
 |---|---|---|---|
@@ -202,10 +231,23 @@ When an article is created, the backend must create the article row and the init
 | version_type | ENUM | NOT NULL, DEFAULT `SOURCE` | Allowed values: `SOURCE`, `AI_REWRITE`, `DRAFT`, `FINAL` |
 
 Unique Constraints:
-- (article_id, version_num)
+```text
+(article_id, version_num)
+```
 
 Foreign Keys:
-- article_id → articles.id
+```text
+article_id → articles.id
+```
+
+Purpose:
+```text
+- Store article content history
+- Track AI rewritten versions
+- Support editor draft workflow
+- Preserve final published version
+- Allow rollback or version comparison
+```
 
 ## 6. Publish Logs
 
