@@ -1,6 +1,6 @@
 > **📝 关于本文档**
 >
-> 这份是 Tiffany 起草的 **High-Level Design (HLD)**,从原 Google Doc 迁移到仓库管理。
+> 这份是 **High-Level Design (HLD)**,从原 Google Doc 迁移到仓库管理。
 >
 > 与 [`HL-Intern-Project.md`](../HL-Intern-Project.md) 的关系:
 > - `HL-Intern-Project.md` 偏 **spec**(已敲定的技术选型、schema、API、里程碑)
@@ -205,11 +205,133 @@ Backend 会在以下事件发生时发送 Telegram 通知:
 
 #### Database Module
 
-系统保留编辑修改记录和版本历史,记录每次修改的编辑人和时间,支持回溯历史版本,并确保可以追踪最终发布内容对应的版本。
+**选型**:PostgreSQL 16
 
-> 🚧 **TODO**: 补充完整 schema(参考 `HL-Intern-Project.md §4` 的 2 表方案 + 自己的补充字段)。
+**表方案**:采用原版 `HL-Intern-Project.md §4` 的 2 表方案(`news_articles` + `users`),在此基础上补充几个**不引入新功能、纯属补充**的字段(`source_published_at` / `wp_url` / `email` / `updated_at`)以及一个**已沟通确认**的业务字段(`content_type`)。
 
-> 📦 备注: 早期 6 表设计稿已归档到 [`docs/archive/schema-v2.md`](archive/schema-v2.md),作为 Phase 2 演进参考。
+> 📦 **备注**:早期 6 表设计稿已归档到 [`docs/archive/schema-v2.md`](archive/schema-v2.md),作为 Phase 2 演进参考。`article_versions` / `publish_logs` / `categories` 等扩展暂不引入。
+
+---
+
+##### `news_articles` 表
+
+| 字段名 | 数据类型 | 约束 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `id` | UUID | PK, DEFAULT gen_random_uuid() | 主键 |
+| `source_url` | VARCHAR(2048) | UNIQUE, NOT NULL | 原始新闻链接(唯一约束,用于去重) |
+| `source_title` | VARCHAR(500) | | 原始新闻标题 |
+| `source_content` | TEXT | | 原始新闻正文(供编辑对照) |
+| `source_site` | VARCHAR(100) | | 来源站点名称(如 "TechCrunch") |
+| ➕ `source_published_at` | TIMESTAMPTZ | | 原文在源站点的发布时间(与 `published_at` 区分) |
+| `ai_title` | VARCHAR(500) | NOT NULL | AI 生成的标题(编辑可修改) |
+| `ai_content` | TEXT | NOT NULL | AI 生成的正文(编辑可修改) |
+| `ai_summary` | VARCHAR(280) | | AI 生成的摘要(用于 Twitter,≤280 字符) |
+| ➕ `content_type` | VARCHAR(20) | NOT NULL, DEFAULT 'ARTICLE' | 分发路由:`ARTICLE` 走 WordPress+Twitter,`SHORT` 直发 Twitter(已确认) |
+| `status` | VARCHAR(20) | NOT NULL, DEFAULT 'PENDING' | 见下方"状态机"小节 |
+| `rejection_reason` | TEXT | | 驳回原因(`status=REJECTED` 时填写) |
+| `reviewed_by` | UUID | FK → users.id | 审核人 |
+| `published_at` | TIMESTAMP | | 我们系统发布到外站的时间 |
+| `wp_post_id` | INTEGER | | WordPress 文章 ID(发布回执) |
+| ➕ `wp_url` | TEXT | | WordPress 完整 URL(前端展示用,光有 ID 不能直接点开) |
+| `tweet_id` | VARCHAR(50) | | Twitter 推文 ID(发布回执) |
+| `created_at` | TIMESTAMP | DEFAULT NOW() | 入库时间 |
+| `updated_at` | TIMESTAMP | DEFAULT NOW(), ON UPDATE | 最后修改时间 |
+
+`➕` 标记的为相对原版**新增**的字段。
+
+---
+
+##### `users` 表
+
+| 字段名 | 数据类型 | 约束 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `id` | UUID | PK | 主键 |
+| `username` | VARCHAR(50) | UNIQUE, NOT NULL | 登录用户名 |
+| ➕ `email` | VARCHAR(255) | UNIQUE, NOT NULL | 邮箱(密码重置 / 唯一标识) |
+| `password_hash` | VARCHAR(255) | NOT NULL | bcrypt 哈希后的密码 |
+| `display_name` | VARCHAR(100) | | 显示名称(UI 展示用,不直接暴露登录名) |
+| `role` | VARCHAR(20) | DEFAULT 'editor' | 角色:`editor` / `admin` |
+| `created_at` | TIMESTAMP | DEFAULT NOW() | 创建时间 |
+| ➕ `updated_at` | TIMESTAMP | DEFAULT NOW(), ON UPDATE | 最后修改时间(标准审计字段) |
+
+---
+
+##### 内容类型分发规则 (`content_type`)
+
+```
+content_type = 'ARTICLE':
+  → 1. 发布到 WordPress,拿 wp_post_id + wp_url
+  → 2. 用 wp_url 发推到 Twitter
+  → status: PUBLISHING → PUBLISHED (两者都成功)
+  → 失败: PUBLISHING → FAILED
+
+content_type = 'SHORT':
+  → 1. 直接发推到 Twitter(用 ai_summary 内容)
+  → status: PUBLISHING → PUBLISHED
+  → wp_post_id / wp_url 字段保持 NULL
+```
+
+---
+
+##### 设计决策
+
+
+**为什么加 `content_type`?**
+MVP 必须支持两种发布类型:正式文章(ARTICLE,走 WP+Twitter)和短讯(SHORT,直发 Twitter)。已确认。
+
+**为什么加 `source_published_at`?**
+要区分"原文何时发布"和"我们何时转发布"。同一个字段表达不了两个语义。
+
+**为什么加 `wp_url`?**
+前端列表 / 通知里要能直接点开 WordPress 文章,光有 `wp_post_id` 还要拼接 URL。
+
+**为什么加 `email`?**
+现代 user 表标配 —— 密码重置、唯一标识、对接外部系统都需要 email。
+
+**为什么加 `users.updated_at`?**
+标准审计字段,原版未包含,补上。
+
+---
+
+##### 索引(建议)
+
+```
+news_articles:
+  - UNIQUE (source_url)        -- 去重
+  - INDEX (status)             -- 列表筛选高频
+  - INDEX (source_site)        -- 按来源筛选
+  - INDEX (content_type)       -- 按类型筛选
+  - INDEX (created_at DESC)    -- 最新优先排序
+
+users:
+  - UNIQUE (username)
+  - UNIQUE (email)
+```
+
+> 🚧 **TODO**: 索引清单是初步建议,实际跑起来根据查询模式调整。
+
+---
+
+##### 状态机
+
+> 🚧 **TODO**: 状态机需基于原版 `HL-Intern-Project.md §4.3` 进一步梳理后定稿。**本节暂不下结论。**
+
+---
+
+##### 亟待决定的问题 (Open Schema Decisions)
+
+下面这些是 **schema 层**还没定的问题(只涉及"加什么字段 / 字段类型 / 约束 / 表结构",不涉及 API 或业务逻辑)。按优先级排序:
+
+| # | 问题 | 选项 | 影响 | 优先级 |
+|---|---|---|---|---|
+| 1 | **状态机的枚举值与流转**:`status` 字段的合法值和合法流转路径 | 需基于原版 `HL-Intern-Project.md §4.3` 进一步梳理后定稿 | 影响后端 publish 流程的状态写入逻辑 | 🔴 高(blocking) |
+| 2 | **per-platform 状态字段**:是否在 `news_articles` 加 `wp_status` / `tweet_status` / `wp_error` / `tweet_error` 等列 | A. 不加,只用单一 `status` / B. 加,精确追踪每平台 | "WP 成功 Twitter 失败"场景下,重试时能否避免重复发 WP | 🟡 中 |
+| 3 | **并发编辑保护字段**:是否在 `news_articles` 加 `claimed_by` / `claimed_at` 列 | A. 不加(MVP 不做并发保护)/ B. 加,做悲观锁 | 数据竞争风险 vs 表字段数 | 🟡 中 |
+| 4 | **`ai_summary` 长度约束**:`VARCHAR(280)` 对中文是否够 | Twitter 限 280 字符,中文按字算 + t.co 链接 23 字符 → 实际安全 ≤ 250 中文字符,可能要改 `VARCHAR(250)` | 列约束 + Twitter 发布失败率 | 🟢 低 |
+| 5 | **软删字段**:是否加 `deleted_at` 列 | A. 硬删,不加 / B. 软删,在两张表都加 `deleted_at TIMESTAMPTZ` | 历史数据保留、审计 | 🟢 低(MVP 阶段可后议) |
+| 6 | **`updated_by` 字段**:是否在 `news_articles` 加 `updated_by UUID FK→users.id` | A. 不加(`reviewed_by` 够了)/ B. 加,记录最后编辑人 | 审计完整性 | 🟢 低 |
+
+> 💡 **建议处理顺序**:#1(状态机)是 blocking,必须先定;#2-3 本周内决定;#4-6 可以等开始写代码时再决定。
 
 ---
 
