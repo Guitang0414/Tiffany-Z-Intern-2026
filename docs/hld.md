@@ -226,7 +226,7 @@ Backend 会在以下事件发生时发送 Telegram 通知:
 | `ai_title` | VARCHAR(500) | NOT NULL | AI 生成的标题(编辑可修改) |
 | `ai_content` | TEXT | NOT NULL | AI 生成的正文(编辑可修改) |
 | `ai_summary` | VARCHAR(280) | | AI 生成的摘要(用于 Twitter,≤280 字符) |
-| `content_type` | VARCHAR(20) | NOT NULL, DEFAULT 'ARTICLE' | 分发路由:`ARTICLE` 走 WordPress+Twitter,`SHORT` 直发 Twitter(已确认) |
+| `content_type` | VARCHAR(20) | NOT NULL, DEFAULT 'ARTICLE' | 分发路由:`ARTICLE` 走 WordPress+Twitter,`SHORT` 直发 Twitter |
 | `status` | VARCHAR(20) | NOT NULL, DEFAULT 'PENDING' | 见下方"状态机"小节 |
 | `rejection_reason` | TEXT | | 驳回原因(`status=REJECTED` 时填写) |
 | `reviewed_by` | UUID | FK → users.id | 审核人 |
