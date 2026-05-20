@@ -2,7 +2,7 @@
 >
 > 这份是 Tiffany 起草的 **High-Level Design (HLD)**,从原 Google Doc 迁移到仓库管理。
 >
-> 与 mentor 写的 [`HL-Intern-Project.md`](../HL-Intern-Project.md) 的关系:
+> 与 [`HL-Intern-Project.md`](../HL-Intern-Project.md) 的关系:
 > - `HL-Intern-Project.md` 偏 **spec**(已敲定的技术选型、schema、API、里程碑)
 > - 本文档偏 **design**(模块责任拆解、设计思路、未决问题)
 >
