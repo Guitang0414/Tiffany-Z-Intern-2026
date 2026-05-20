@@ -52,7 +52,13 @@
 **Responsibility**:
 Agent 模块负责从外部的新闻源抓取新闻并且调用 AI 改写,将处理后的新闻数据通过 Webhook 推送到后端。
 
-> ❓ **思考**: 不同栏目对应不同 keyword(例如医疗),做关键词匹配 filter + 语义匹配(意思相关度高就会被筛选到),用 AI prompt 实现。
+**Category 分配机制**:Agent 用 AI 关键词匹配 + 语义匹配判断每篇文章属于哪个 `category`(`categories` 表中的话题分类,如 Medical / Politics / Finance / AI)。每个 category 在 admin 配置时关联一组 keyword,Agent 抓到原文后:
+
+1. 关键词预筛(快速过滤明显不相关的)
+2. 调 Claude API 用 prompt:_"下面这篇文章属于以下 categories 中的哪一个?[列表]。返回最匹配的一个 category name 和匹配置信度 0-1"_
+3. 取置信度最高的 category 作为这篇文章的归属
+
+**每篇文章对应一个 category**(MVP 简化,不做多对多),Webhook 提交时把 `category` name 一起送给 Backend。
 
 **Input**:
 - source 名称
@@ -104,13 +110,25 @@ flowchart TD
 
 Agent 输出结构化新闻数据,包括:
 - 原始新闻链接(`source_url`)
-- 原始标题
-- 原始正文
-- 来源信息(`source_site`)
-- 原新闻发布时间(`published_at`)
-- AI 改写后的标题
-- AI 改写后的正文
-- AI 生成的摘要
+- 原始标题(`source_title`)
+- 原始正文(`source_content`)
+- 来源信息(`source_site`)—— 原始网站,如 "Reuters"
+- 原新闻在源站点的发布时间(`source_published_at`)
+- AI 改写后的标题(`ai_title`)
+- AI 改写后的正文(`ai_content`)
+- AI 生成的摘要(`ai_summary`)
+- **AI 判定的话题分类(`category` name)** —— 如 "Medical",Backend 解析为 `category_id` 后入库
+
+**Edge cases(category 分配)**:
+
+| 场景 | 处理 |
+|---|---|
+| 一篇匹配多个 category(置信度都不低) | Agent 选**置信度最高**的那个,只送一个 `category` |
+| 所有 category 都不匹配(最高置信度 < 阈值,如 < 0.5) | Agent **跳过**这篇,不发 webhook,日志记录"unclassifiable" |
+| Backend 收到不存在的 `category` name(如 admin 改了 category 名但 Agent 配置没同步) | Backend 返回 `400 Bad Request`,Agent 记录后跳过,**同时 Telegram 告警** |
+| Agent 抓到符合多 category 的文章但都不强 | 同"所有 category 都不匹配",跳过更安全(避免错分类污染编辑列表) |
+
+> 🚧 **TODO**: 置信度阈值定多少?初步建议 0.5,跑起来后调整。
 
 ---
 
@@ -637,9 +655,9 @@ PENDING → REJECTED → PENDING                (可选,重新提交)
 | 4 | **`ai_summary` 长度约束**:`VARCHAR(280)` 对中文是否够 | Twitter 限 280 字符,中文按字算 + t.co 链接 23 字符 → 实际安全 ≤ 250 中文字符,可能要改 `VARCHAR(250)` | 🟢 低 |
 | 5 | **软删字段**:是否加 `deleted_at` 列 | A. 硬删,不加 / B. 软删(在 `news_articles` / `users` / `categories` 加 `deleted_at TIMESTAMPTZ`) | 🟢 低(MVP 阶段可后议) |
 | 6 | **`updated_by` 字段**:是否在 `news_articles` 加 `updated_by UUID FK→users.id` | A. 不加(`reviewed_by` 够了)/ B. 加,记录最后编辑人 | 🟢 低 |
-| 7 | **`category_id` 入库时谁决定** | A. Agent 自己分类 / B. Backend 默认 "Uncategorized" / C. Backend 调 AI 归类 | 🟡 中(影响 Agent 接口与 Backend 逻辑) |
+| ~~7~~ | ~~`category_id` 入库时谁决定~~ | ✅ **已决**:A. Agent 通过 AI 关键词+语义匹配判断 category,webhook 传 `category` name,Backend 解析为 `category_id`。边界情况见 Agent Module 的 Edge cases 小节 | ✅ 已决 |
 
-> 💡 **状态**:#1 和 #3 已敲定;剩 #2 和 #7 可以本周内决定;#4-6 等开始写代码时再决定。
+> 💡 **状态**:#1 / #3 / #7 已敲定;剩 #2 可以本周内决定;#4-6 等开始写代码时再决定。
 
 ##### Phase 2 推迟项(MVP 不做,后续可演进)
 
