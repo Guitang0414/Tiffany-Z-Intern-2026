@@ -87,6 +87,19 @@ Agent 抓取新闻源页面后,提取有效信息,包括:
 
 > ❓ **思考**: 文章类的用什么类型的数据库存? → **PostgreSQL** ✓
 
+**Processing Flow**:
+
+```mermaid
+flowchart TD
+    S[⏰ Scheduler] -->|按 frequency 触发<br/>抓取任务| A[🤖 Hermes Agent]
+    A -->|抓取 configured sources| N[(📰 News Websites)]
+    N -->|HTML / 原始数据| A
+    A -->|按 keyword + 语义匹配筛选| A2[🤖 Hermes Agent<br/>已筛选原文]
+    A2 -->|原文 + rewrite prompt| C[🧠 Claude API]
+    C -->|改写后 title / content / summary| A3[🤖 Hermes Agent<br/>已改写]
+    A3 -->|Webhook POST<br/>X-Agent-Key 认证| B[⚙️ Backend API<br/>/webhook/incoming-news]
+```
+
 **Output**:
 
 Agent 输出结构化新闻数据,包括:
@@ -151,28 +164,26 @@ Backend 接收 webhook 传来的数据后,会先对原始新闻数据进行**标
 
 **如果用户是 editor**:
 
-1. **获取新闻**:编辑从前端发出获取新闻请求,后端从 DB 读出对应的新闻并发给前端
+1. **获取新闻**:编辑从前端发出获取新闻请求,后端从 DB 读出对应的新闻并发给前端(返回 `ai_*` 原文 + `edited_*` 编辑修改;前端若 `edited_*` 为 NULL 则显示 `ai_*`)
 
-2. **保存草稿(save)**:如果只是保存草稿,就向 DB 写入修改后的内容和版本号,更新成 `DRAFT` 状态,这步不会触发发布流程
+2. **保存(save)**:Backend 把编辑修改的内容写入 `edited_title` / `edited_content` / `edited_summary` 字段,**不覆盖 `ai_*` 原文**,**`status` 保持 `PENDING`**(MVP 不引入 DRAFT 状态,不维护版本历史)。同时检查请求里的 `updated_at`,实现 optimistic concurrency。
 
 3. **发布(publish)**:
-   - 请求中带上最新版本的 edited news 和 `content_type`
-   - Backend 收到请求后,会先检查 `content_type` 是否存在,并从用户身份信息中获取 `user_id`
-   - 如果 `content_type` 缺失,则返回错误
-   - 校验通过后,Backend 会先将 edited news、`content_type` 和 `user_id` 保存到数据库,并更新版本记录,同时把新闻状态更新为 `PUBLISHING`
-   - 随后 Backend 根据 `content_type` 选择发布路径:
-     - **ARTICLE**: 先发布到 WordPress,成功后保存 WordPress 返回的 `article_url` 和 `post_id`,再将该链接发布到 Twitter
-     - **SHORT**: 直接发布到 Twitter
-   - 每次外部发布的结果都会写入发布记录表,包括平台、状态、外部 `post_id`、链接或错误原因
+   - 请求中带上编辑修改后的内容和 `content_type`
+   - Backend 收到请求后,先从用户身份信息(JWT)中获取 `user_id`,并**校验 `content_type` 不为 NULL**(`content_type` 在 schema 中是 nullable,但发布时必填,缺失返回 `422 Validation Error`)
+   - 校验通过后,Backend 把编辑修改写入 `edited_*` 字段、记录 `reviewed_by = user_id`,并把 `status` 更新为 `PUBLISHING`
+   - 随后 Backend 根据 `content_type` 选择发布路径(发布时**优先使用 `edited_*`,若 NULL 则 fallback 使用 `ai_*`**):
+     - **ARTICLE**: 先发布到 WordPress,成功后保存 `wp_post_id` + `wp_url`,再将该链接发布到 Twitter
+     - **SHORT**: 直接发布到 Twitter(用 summary 内容)
    - 最后 Backend 根据发布结果更新新闻的最终状态(`PUBLISHED` 或 `FAILED`)
 
-4. **驳回(reject)**:Backend 更新状态为 `REJECTED`,并记录 rejection reason 到 `news_articles`
+4. **驳回(reject)**:Backend 更新状态为 `REJECTED`,记录 `rejection_reason` 到 `news_articles`
 
 > 🚧 **TODO**: User 怎么和 interface 交互?admin / editor 通过前端交互,不同权限和前端有哪些功能交互。Agent 算是一个特殊的 user。
 
 ##### Publishing processing
 
-在发布过程中,如果 WordPress 或 Twitter API 调用失败,Backend 会根据 retry 策略进行有限次数重试。每次尝试都会记录到 `publish_logs` 表中,包括平台、状态、错误信息和尝试时间。如果重试后仍然失败,Backend 会将新闻状态更新为 `FAILED`,并保留错误日志,供 admin 后续手动 retry。
+在发布过程中,如果 WordPress 或 Twitter API 调用失败,Backend 会根据 retry 策略进行有限次数重试。如果重试后仍然失败,Backend 会把新闻 `status` 更新为 `FAILED`,并把错误详情写入文章的错误字段(per-platform 错误字段的最终方案见 Database Module 的 Open Schema Decisions #2),供 admin 后续手动 retry。MVP 阶段不引入独立的 `publish_logs` 表,完整重试历史推迟到 Phase 2。
 
 ##### Notifying processing
 
@@ -199,7 +210,145 @@ Backend 会在以下事件发生时发送 Telegram 通知:
 
 #### Frontend Module
 
-> 🚧 **TODO**: 待填写。可参考 `permission-flow.md` 中的 Frontend behavior 章节(Sidebar / Dashboard / Available Articles / Article Preview / Article Editing / My Drafts / Published / Failed Publishing 等页面规格)。
+> 📌 **关于本节**:页面规格内容来自 `permission-flow.md` 的 Frontend behavior 章节(已合并到此)。
+>
+> **MVP 阶段的关键调整**:
+> - **claim / unclaim 机制不实现**:编辑直接打开文章编辑,并发冲突由后端通过 `updated_at` optimistic concurrency 检测;冲突时返回 `409 Conflict`,前端提示"内容已被他人修改,请刷新重试"。
+> - **没有 DRAFT 状态**:编辑保存的稿子文章状态保持 `PENDING`,内容写入 `edited_title` / `edited_content` / `edited_summary` 字段(`ai_*` 原文不被覆盖)。
+> - **`categories` 用于编辑路由**:editor 只看自己被分配的 category 下的文章。`source_site`(原始网站,如 Reuters)和 `category`(话题,如 Politics)是两个维度,**不要混淆**。
+
+##### Editor Interaction Flow
+
+编辑在工作台的完整动线:
+
+```mermaid
+flowchart TD
+    Login[编辑登录] --> Dashboard["Dashboard<br/>展示分配 category 下的<br/>PENDING 文章"]
+    Dashboard -.->|可选预览| Preview[Article Preview]
+    Preview --> Edit["编辑标题 / 正文<br/>(显示 edited_* 或 fallback ai_*)"]
+    Dashboard --> Edit
+    Edit --> SelectType[选择 content_type<br/>ARTICLE / SHORT]
+    SelectType -.->|可选| Save["保存<br/>(写入 edited_title/<br/>edited_content/edited_summary<br/>ai_* 不被覆盖<br/>status 保持 PENDING)"]
+    Save -.-> Edit
+    SelectType --> Publish["点击 Publish<br/>(content_type 必填,缺失 422)"]
+    Publish --> Backend["Backend:<br/>status → PUBLISHING<br/>触发分发(用 edited_* 或<br/>fallback ai_*)"]
+
+    Dashboard --> Reject[Reject]
+    Edit --> Reject
+    Reject --> BackendReject["Backend:<br/>status → REJECTED<br/>记录 rejection_reason"]
+```
+
+> 实线 = 必经路径,虚线 = 可选分支。**并发冲突**:若后端检测 `updated_at` 不一致,返回 `409`,前端提示刷新并重新编辑。
+
+##### Sidebar Navigation
+
+The editor dashboard contains a left sidebar navigation for quick access to different article workflows and states.
+
+Navigation items:
+- Dashboard
+- Available Articles
+- Published
+- Failed
+
+> **备注**:MVP 没有独立的 "My Drafts" 页 —— 没有 DRAFT 状态,所有"编辑改过但还没发布"的稿子都是 `PENDING`,直接出现在 Available Articles 里。
+
+##### Dashboard Overview Page
+
+The dashboard overview page provides editors with a quick summary of their workload and recent activity.
+
+The dashboard acts as an overview hub instead of a full article management page.
+
+The overview page may include:
+- Recent `PENDING` articles in the editor's assigned categories
+- Recent activity (recently published / rejected, etc.)
+- Quick statistics
+
+Each section may display only a small number of recent items with a "View All" action that redirects to the corresponding full page.
+
+##### Available Articles Page
+
+The Available Articles page displays the full list of `PENDING` articles from categories assigned to the current editor.
+
+This page may support:
+- Pagination
+- Search
+- Filtering (by `category`, `source_site`, `content_type`)
+- Sorting
+
+Each article row may display:
+- Article title
+- **Category tag**(话题,如 "Politics")
+- **Source site**(原始网站,如 "Reuters")
+- Preview button
+- Edit button
+
+Category should be displayed as a colored tag/label for quick identification.
+
+Editors can:
+- Preview article details
+- Open an article for editing _(no claim required)_
+
+##### Article Preview Page
+
+The preview page allows editors to review the full article information before editing.
+
+The preview page may include:
+- Article title
+- Original source name (`source_site`)
+- Original URL (`source_url`)
+- Original published time (`source_published_at`), if available
+- Crawled time (`created_at`)
+- Original article content (`source_content`)
+- AI rewritten title/content (`ai_title` / `ai_content`)
+- Current category (`category_id` → name)
+- Content type (`content_type`)
+- Related metadata from the agent
+
+Available actions:
+- Back to Available Articles
+- Edit
+- Reject article
+
+##### Article Editing Page
+
+When an editor opens an article for editing, the system shows the editing workspace.
+
+The editing page may include:
+- Editable article title(显示 `edited_title`,若 NULL 则 fallback 显示 `ai_title`)
+- Editable article content(显示 `edited_content`,若 NULL 则 fallback 显示 `ai_content`)
+- Editable summary(显示 `edited_summary`,若 NULL 则 fallback 显示 `ai_summary`)
+- AI 原文对照视图(只读,展示 `ai_title` / `ai_content` / `ai_summary`)
+- Content type dropdown selection (`ARTICLE` / `SHORT`)
+- Save button(写入 `edited_*` 字段,`status` 保持 `PENDING`,`ai_*` 不被覆盖)
+- Publish button
+- Reject button
+
+> **重置回 AI 原版**:editor 可清空 `edited_*` 字段(对应 UI 上的"恢复 AI 原版"按钮),清空后页面显示自动 fallback 到 `ai_*`。
+
+##### Frontend Validation Rules
+
+- Editors **must select a `content_type` before publishing** an article(`content_type` 在 schema 中是 nullable,但 publish action 时后端校验非 NULL,缺失返回 `422`)。
+- The Publish button should remain disabled until `content_type` is selected.
+- Editors may save edits without publishing (`status` remains `PENDING`,内容写入 `edited_*` 字段,`ai_*` 永远保留为原文)。
+- **Concurrent edits**:Edits use **optimistic concurrency**(后端检查 `updated_at`)。若有人在你 open 之后修改过同一篇,save / publish 时后端返回 `409 Conflict`,前端提示用户刷新并重新编辑。
+
+##### Published Page
+
+The Published page displays articles successfully published.
+
+Editors can:
+- View published article records
+- Check final category and content type
+- Open the published article link if available (`wp_url` / Twitter URL)
+
+##### Failed Publishing Page
+
+The Failed page displays articles that encountered publishing or distribution failures.
+
+Editors may:
+- View publishing error messages
+- Retry failed publishing tasks
+- Re-edit articles before retrying publishing
 
 ---
 
@@ -207,9 +356,82 @@ Backend 会在以下事件发生时发送 Telegram 通知:
 
 **选型**:PostgreSQL 16
 
-**表方案**:采用原版 `HL-Intern-Project.md §4` 的 2 表方案(`news_articles` + `users`),在此基础上补充几个**不引入新功能、纯属补充**的字段(`source_published_at` / `wp_url` / `email` / `updated_at`)以及一个**已沟通确认**的业务字段(`content_type`)。
+**表方案(MVP 4 张表)**:
+- `users` —— 用户(editor / admin)
+- `categories` —— 文章话题分类(如 Politics / Medical / Finance / AI)
+- `user_categories` —— editor 与 category 的多对多关系(决定 editor 能看到哪些 category 下的文章)
+- `news_articles` —— 文章主表
 
-> 📦 **备注**:早期 6 表设计稿已归档到 [`docs/archive/schema-v2.md`](archive/schema-v2.md),作为 Phase 2 演进参考。`article_versions` / `publish_logs` / `categories` 等扩展暂不引入。
+> 📦 **备注**:早期 6 表设计稿见 [`docs/archive/schema-v2.md`](archive/schema-v2.md)。MVP 暂不引入 `article_versions` / `publish_logs` 表,也不加显式 `claim` / `lock` 字段(改用 optimistic concurrency,见下方"设计决策")。Phase 2 视需求重新引入。
+
+---
+
+##### ER 图
+
+```mermaid
+erDiagram
+    users {
+        UUID id PK
+        VARCHAR username UK
+        VARCHAR email UK
+        VARCHAR password_hash
+        VARCHAR display_name
+        VARCHAR role
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ updated_at
+    }
+
+    categories {
+        UUID id PK
+        VARCHAR name UK
+        TEXT description
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ updated_at
+    }
+
+    user_categories {
+        UUID user_id PK_FK
+        UUID category_id PK_FK
+        TIMESTAMPTZ created_at
+    }
+
+    news_articles {
+        UUID id PK
+        UUID category_id FK
+        VARCHAR source_url UK
+        VARCHAR source_title
+        TEXT source_content
+        VARCHAR source_site
+        TIMESTAMPTZ source_published_at
+        VARCHAR ai_title
+        TEXT ai_content
+        VARCHAR ai_summary
+        VARCHAR edited_title
+        TEXT edited_content
+        VARCHAR edited_summary
+        VARCHAR content_type "nullable"
+        VARCHAR status
+        TEXT rejection_reason
+        UUID reviewed_by FK
+        TIMESTAMPTZ published_at
+        INTEGER wp_post_id
+        TEXT wp_url
+        VARCHAR tweet_id
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ updated_at
+    }
+
+    users ||--o{ user_categories : "被分配"
+    categories ||--o{ user_categories : "被分配"
+    categories ||--o{ news_articles : "分类"
+    users ||--o{ news_articles : "审核"
+```
+
+**关系说明**:
+- `users` ↔ `categories` **多对多**(通过 `user_categories` 关联):admin 把 editor 分配到一个或多个 category,editor 只能看到自己被分配 category 下的文章
+- `categories` → `news_articles` **一对多**(通过 `news_articles.category_id`):一篇文章属于一个 category
+- `users` → `news_articles` **一对多**(通过 `news_articles.reviewed_by`):一个 user 可以审核多条文章
+- ⚠️ **`source_site` 不是 `category`**:`source_site` 是**原始网站**(如 Reuters / CNN / TechCrunch),`category` 是**文章话题**(如 Politics / Medical),两者维度不同,不要混淆
 
 ---
 
@@ -218,25 +440,36 @@ Backend 会在以下事件发生时发送 Telegram 通知:
 | 字段名 | 数据类型 | 约束 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `id` | UUID | PK, DEFAULT gen_random_uuid() | 主键 |
+| `category_id` | UUID | NOT NULL, FK → categories.id | 文章话题分类(用于 editor 路由) |
 | `source_url` | VARCHAR(2048) | UNIQUE, NOT NULL | 原始新闻链接(唯一约束,用于去重) |
 | `source_title` | VARCHAR(500) | | 原始新闻标题 |
 | `source_content` | TEXT | | 原始新闻正文(供编辑对照) |
-| `source_site` | VARCHAR(100) | | 来源站点名称(如 "TechCrunch") |
+| `source_site` | VARCHAR(100) | | 原始网站名称(如 "Reuters" / "TechCrunch"),**非话题分类** |
 | `source_published_at` | TIMESTAMPTZ | | 原文在源站点的发布时间(与 `published_at` 区分) |
-| `ai_title` | VARCHAR(500) | NOT NULL | AI 生成的标题(编辑可修改) |
-| `ai_content` | TEXT | NOT NULL | AI 生成的正文(编辑可修改) |
-| `ai_summary` | VARCHAR(280) | | AI 生成的摘要(用于 Twitter,≤280 字符) |
-| `content_type` | VARCHAR(20) | NOT NULL, DEFAULT 'ARTICLE' | 分发路由:`ARTICLE` 走 WordPress+Twitter,`SHORT` 直发 Twitter |
+| `ai_title` | VARCHAR(500) | NOT NULL | AI 生成的**原始**标题(**不被覆盖**) |
+| `ai_content` | TEXT | NOT NULL | AI 生成的**原始**正文(**不被覆盖**) |
+| `ai_summary` | VARCHAR(280) | | AI 生成的**原始**摘要(用于 Twitter,≤280 字符,**不被覆盖**) |
+| `edited_title` | VARCHAR(500) | | 编辑修改后的标题(NULL = 未修改;前端 fallback 显示 `ai_title`,发布时也 fallback) |
+| `edited_content` | TEXT | | 编辑修改后的正文(NULL = 未修改;fallback 用 `ai_content`) |
+| `edited_summary` | VARCHAR(280) | | 编辑修改后的摘要(NULL = 未修改;fallback 用 `ai_summary`) |
+| `content_type` | VARCHAR(20) | **NULLABLE** | 分发路由:`ARTICLE` 走 WordPress+Twitter,`SHORT` 直发 Twitter。**Nullable**;发布前必填,后端在 publish action 时校验,缺失返回 `422` |
 | `status` | VARCHAR(20) | NOT NULL, DEFAULT 'PENDING' | 见下方"状态机"小节 |
 | `rejection_reason` | TEXT | | 驳回原因(`status=REJECTED` 时填写) |
 | `reviewed_by` | UUID | FK → users.id | 审核人 |
-| `published_at` | TIMESTAMP | | 我们系统发布到外站的时间 |
+| `published_at` | TIMESTAMPTZ | | 系统发布到外站的时间 |
 | `wp_post_id` | INTEGER | | WordPress 文章 ID(发布回执) |
-| `wp_url` | TEXT | | WordPress 完整 URL(前端展示用,光有 ID 不能直接点开) |
+| `wp_url` | TEXT | | WordPress 完整 URL(前端展示用) |
 | `tweet_id` | VARCHAR(50) | | Twitter 推文 ID(发布回执) |
-| `created_at` | TIMESTAMP | DEFAULT NOW() | 入库时间 |
-| `updated_at` | TIMESTAMP | DEFAULT NOW(), ON UPDATE | 最后修改时间 |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | 入库时间 |
+| `updated_at` | TIMESTAMPTZ | DEFAULT NOW(), ON UPDATE | 最后修改时间(**用于 optimistic concurrency 版本检查**) |
 
+**字段读 / 写规则**:
+- **AI 原文不被覆盖**:`ai_title` / `ai_content` / `ai_summary` 永远保留 webhook 入库时的原始 AI 生成内容
+- **编辑修改写入 `edited_*`**:editor 在 save / publish action 时,backend 把编辑改动写入 `edited_title` / `edited_content` / `edited_summary`
+- **前端展示 fallback**:前端展示文章时,`edited_*` 字段为 NULL 则显示 `ai_*` 对应字段;非 NULL 则显示 `edited_*`
+- **发布 fallback**:发布到 WordPress / Twitter 时,优先用 `edited_*`,为 NULL 则用 `ai_*`
+
+> 🚧 **TODO**: `category_id` 在 webhook 入库时由谁决定?(选项:Agent 自己分类 / Backend 默认 "Uncategorized" / Backend 调用 AI 自动归类。需后续讨论。)
 
 ---
 
@@ -250,22 +483,54 @@ Backend 会在以下事件发生时发送 Telegram 通知:
 | `password_hash` | VARCHAR(255) | NOT NULL | bcrypt 哈希后的密码 |
 | `display_name` | VARCHAR(100) | | 显示名称(UI 展示用,不直接暴露登录名) |
 | `role` | VARCHAR(20) | DEFAULT 'editor' | 角色:`editor` / `admin` |
-| `created_at` | TIMESTAMP | DEFAULT NOW() | 创建时间 |
-| `updated_at` | TIMESTAMP | DEFAULT NOW(), ON UPDATE | 最后修改时间(标准审计字段) |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | 创建时间 |
+| `updated_at` | TIMESTAMPTZ | DEFAULT NOW(), ON UPDATE | 最后修改时间(标准审计字段) |
+
+---
+
+##### `categories` 表
+
+文章话题分类(如 Politics、Medical、Finance、AI),由 admin 管理。
+
+| 字段名 | 数据类型 | 约束 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `id` | UUID | PK, DEFAULT gen_random_uuid() | 主键 |
+| `name` | VARCHAR(50) | UNIQUE, NOT NULL | 分类名(如 "Politics"、"Medical") |
+| `description` | TEXT | | 可选描述 |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | 创建时间 |
+| `updated_at` | TIMESTAMPTZ | DEFAULT NOW(), ON UPDATE | 最后修改时间 |
+
+---
+
+##### `user_categories` 表
+
+editor 与 category 的多对多关联表,决定 editor 在前端能看到哪些 category 下的文章。
+
+| 字段名 | 数据类型 | 约束 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `user_id` | UUID | PK, FK → users.id | 编辑用户 ID |
+| `category_id` | UUID | PK, FK → categories.id | 分类 ID |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | 分配时间 |
+
+**复合主键**:`(user_id, category_id)`,天然防止重复分配。
 
 ---
 
 ##### 内容类型分发规则 (`content_type`)
 
+**何时设置**:`content_type` 字段是 nullable,默认 NULL。Editor 在编辑界面选择 `ARTICLE` 或 `SHORT`,后端在 publish action 时校验非 NULL(缺失返回 `422`)。
+
+**发布时取值**:发布到外站使用编辑修改 fallback 规则 —— `edited_*` 字段为 NULL 则用 `ai_*` 对应字段。
+
 ```
 content_type = 'ARTICLE':
-  → 1. 发布到 WordPress,拿 wp_post_id + wp_url
-  → 2. 用 wp_url 发推到 Twitter
+  → 1. 发布到 WordPress,使用 (edited_title || ai_title) + (edited_content || ai_content)
+  → 2. 拿 wp_post_id + wp_url,用 wp_url 发推到 Twitter
   → status: PUBLISHING → PUBLISHED (两者都成功)
   → 失败: PUBLISHING → FAILED
 
 content_type = 'SHORT':
-  → 1. 直接发推到 Twitter(用 ai_summary 内容)
+  → 1. 直接发推到 Twitter,使用 (edited_summary || ai_summary)
   → status: PUBLISHING → PUBLISHED
   → wp_post_id / wp_url 字段保持 NULL
 ```
@@ -274,9 +539,23 @@ content_type = 'SHORT':
 
 ##### 设计决策
 
+**为什么 MVP 用 4 张表(`users` / `categories` / `user_categories` / `news_articles`)?**
+- editor 路由(医疗编辑只看医疗稿)是 MVP 必需功能,需要 `categories` + `user_categories` 显式建模
+- 暂不引入 `article_versions` / `publish_logs` 表,这两项视为 Phase 2 演进
 
-**为什么加 `content_type`?**
-MVP 必须支持两种发布类型:正式文章(ARTICLE,走 WP+Twitter)和短讯(SHORT,直发 Twitter)。已确认。
+**为什么 `categories` 不能用 `source_site` 替代?**
+- `source_site` = **原始网站**(Reuters / CNN / TechCrunch)
+- `category` = **文章话题**(Politics / Medical / Finance / AI)
+- 两者维度不同:Reuters 同时产 Politics 和 Medical 文章,按 `source_site` 分配 editor 会跨多个话题,**不符合"按话题路由"的需求**
+
+**为什么加 `content_type`?为什么 nullable?**
+MVP 必须支持两种发布类型:正式文章(ARTICLE,走 WP+Twitter)和短讯(SHORT,直发 Twitter)。设为 nullable 是因为入库时还不确定类型,由编辑在审核阶段选择;后端在 publish action 时校验非 NULL,缺失返回 `422`。
+
+**为什么用 `edited_*` 字段而不是覆盖 `ai_*`?**
+- 保留 AI 原文便于编辑对照(前端"原文 vs 修改后"对比视图直接用 `ai_*` vs `edited_*`)
+- 任何时候都能"回到 AI 原版重新写"(editor 清空 `edited_*` 即可)
+- 不需要单独的 `article_versions` 表也能保留最基本的"原始 vs 当前"两个版本
+- 前端 / 发布逻辑用 fallback:`edited_*` 为 NULL 时回退到 `ai_*`
 
 **为什么加 `source_published_at`?**
 要区分"原文何时发布"和"我们何时转发布"。同一个字段表达不了两个语义。
@@ -290,21 +569,39 @@ MVP 必须支持两种发布类型:正式文章(ARTICLE,走 WP+Twitter)和短讯
 **为什么加 `users.updated_at`?**
 标准审计字段,原版未包含,补上。
 
+**为什么不加 `claimed_by` / `claimed_at` 字段?(用 optimistic concurrency 替代)**
+- 后端 / ORM 用 `news_articles.updated_at`(或 ORM 自带的 version 字段)做**版本检查**
+- 前端编辑时记录当前 `updated_at`,提交时一并发回;后端比对,不一致返回 `409 Conflict`,前端提示"内容已被他人修改,请刷新重试"
+- **不增加 schema 字段**,减少状态管理复杂度
+- Phase 2 如需在 UI 上显示"Alice 正在编辑",再引入显式 claim 机制
+
+**为什么 status 里没有 DRAFT?**
+- MVP 简化:编辑保存后文章保持 `PENDING`,内容写入 `edited_*` 字段(`ai_*` 原文保留不动)
+- 不维护版本历史(那是 `article_versions` 的事,Phase 2)
+- 含义:"编辑改过但还没发布的稿" = "我正在审核中的某条 PENDING"
+
 ---
 
 ##### 索引(建议)
 
 ```
 news_articles:
-  - UNIQUE (source_url)        -- 去重
-  - INDEX (status)             -- 列表筛选高频
-  - INDEX (source_site)        -- 按来源筛选
-  - INDEX (content_type)       -- 按类型筛选
-  - INDEX (created_at DESC)    -- 最新优先排序
+  - UNIQUE (source_url)         -- 去重
+  - INDEX  (status)             -- 列表筛选高频
+  - INDEX  (category_id)        -- editor 按 category 筛选高频
+  - INDEX  (content_type)       -- 按类型筛选
+  - INDEX  (created_at DESC)    -- 最新优先排序
 
 users:
   - UNIQUE (username)
   - UNIQUE (email)
+
+categories:
+  - UNIQUE (name)
+
+user_categories:
+  - PRIMARY KEY (user_id, category_id)   -- 复合主键(天然唯一)
+  - INDEX (category_id)                  -- 反向查询:此 category 下分配了哪些 editor
 ```
 
 > 🚧 **TODO**: 索引清单是初步建议,实际跑起来根据查询模式调整。
@@ -313,24 +610,44 @@ users:
 
 ##### 状态机
 
-> 🚧 **TODO**: 状态机需基于原版 `HL-Intern-Project.md §4.3` 进一步梳理后定稿。**本节暂不下结论。**
+```
+PENDING → PUBLISHING → PUBLISHED        (审批通过 → 分发 → 全部成功)
+                    → FAILED → PUBLISHING   (分发失败 → 重试)
+PENDING → REJECTED → PENDING                (可选,重新提交)
+```
+
+**MVP 5 个合法状态值**:`PENDING` / `PUBLISHING` / `PUBLISHED` / `FAILED` / `REJECTED`(**无 DRAFT**)。
+
+**关键规则**:
+- **草稿不是独立状态**:编辑保存后文章保持 `PENDING`,修改写入 `edited_*` 字段(`ai_*` 原文保留不动)
+- **必经 `PUBLISHING` 中间态**:`PENDING` 不能直接到 `PUBLISHED`
+- **`REJECTED → PENDING` 是 optional**:产品决定要不要支持"重新提交",MVP 可先不实现,只允许 REJECTED 作为终态
 
 ---
 
 ##### 亟待决定的问题 (Open Schema Decisions)
 
-下面这些是 **schema 层**还没定的问题(只涉及"加什么字段 / 字段类型 / 约束 / 表结构",不涉及 API 或业务逻辑)。按优先级排序:
+下面这些是 **schema 层**还没定的问题(只涉及"加什么字段 / 字段类型 / 约束 / 表结构",不涉及 API 或业务逻辑)。
 
-| # | 问题 | 选项 | 影响 | 优先级 |
-|---|---|---|---|---|
-| 1 | **状态机的枚举值与流转**:`status` 字段的合法值和合法流转路径 | 需基于原版 `HL-Intern-Project.md §4.3` 进一步梳理后定稿 | 影响后端 publish 流程的状态写入逻辑 | 🔴 高(blocking) |
-| 2 | **per-platform 状态字段**:是否在 `news_articles` 加 `wp_status` / `tweet_status` / `wp_error` / `tweet_error` 等列 | A. 不加,只用单一 `status` / B. 加,精确追踪每平台 | "WP 成功 Twitter 失败"场景下,重试时能否避免重复发 WP | 🟡 中 |
-| 3 | **并发编辑保护字段**:是否在 `news_articles` 加 `claimed_by` / `claimed_at` 列 | A. 不加(MVP 不做并发保护)/ B. 加,做悲观锁 | 数据竞争风险 vs 表字段数 | 🟡 中 |
-| 4 | **`ai_summary` 长度约束**:`VARCHAR(280)` 对中文是否够 | Twitter 限 280 字符,中文按字算 + t.co 链接 23 字符 → 实际安全 ≤ 250 中文字符,可能要改 `VARCHAR(250)` | 列约束 + Twitter 发布失败率 | 🟢 低 |
-| 5 | **软删字段**:是否加 `deleted_at` 列 | A. 硬删,不加 / B. 软删,在两张表都加 `deleted_at TIMESTAMPTZ` | 历史数据保留、审计 | 🟢 低(MVP 阶段可后议) |
-| 6 | **`updated_by` 字段**:是否在 `news_articles` 加 `updated_by UUID FK→users.id` | A. 不加(`reviewed_by` 够了)/ B. 加,记录最后编辑人 | 审计完整性 | 🟢 低 |
+| # | 问题 | 选项 | 优先级 / 状态 |
+|---|---|---|---|
+| 1 | **状态机的枚举值与流转** | ✅ **已决**:`PENDING` / `PUBLISHING` / `PUBLISHED` / `FAILED` / `REJECTED`(无 DRAFT)| ✅ 已决 |
+| 2 | **per-platform 状态字段**:是否在 `news_articles` 加 `wp_status` / `tweet_status` / `wp_error` / `tweet_error` 等列 | A. 不加,只用单一 `status` / B. 加,精确追踪每平台 | 🟡 中 |
+| 3 | **并发编辑保护字段** | ✅ **已决**:不加 `claimed_by` / `claimed_at`,改用 optimistic concurrency(后端 / ORM 用 `updated_at` 做版本检查) | ✅ 已决 |
+| 4 | **`ai_summary` 长度约束**:`VARCHAR(280)` 对中文是否够 | Twitter 限 280 字符,中文按字算 + t.co 链接 23 字符 → 实际安全 ≤ 250 中文字符,可能要改 `VARCHAR(250)` | 🟢 低 |
+| 5 | **软删字段**:是否加 `deleted_at` 列 | A. 硬删,不加 / B. 软删(在 `news_articles` / `users` / `categories` 加 `deleted_at TIMESTAMPTZ`) | 🟢 低(MVP 阶段可后议) |
+| 6 | **`updated_by` 字段**:是否在 `news_articles` 加 `updated_by UUID FK→users.id` | A. 不加(`reviewed_by` 够了)/ B. 加,记录最后编辑人 | 🟢 低 |
+| 7 | **`category_id` 入库时谁决定** | A. Agent 自己分类 / B. Backend 默认 "Uncategorized" / C. Backend 调 AI 归类 | 🟡 中(影响 Agent 接口与 Backend 逻辑) |
 
-> 💡 **建议处理顺序**:#1(状态机)是 blocking,必须先定;#2-3 本周内决定;#4-6 可以等开始写代码时再决定。
+> 💡 **状态**:#1 和 #3 已敲定;剩 #2 和 #7 可以本周内决定;#4-6 等开始写代码时再决定。
+
+##### Phase 2 推迟项(MVP 不做,后续可演进)
+
+- `article_versions` 表 —— 版本历史 / 草稿历史 / 回滚
+- `publish_logs` 表 —— 每次分发尝试一行,完整重试历史
+- 显式 `claim` / `lock` 字段 —— 在 UI 显示"谁正在编辑"
+
+详见已归档稿 [`docs/archive/schema-v2.md`](archive/schema-v2.md)。
 
 ---
 
