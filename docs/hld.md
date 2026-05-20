@@ -222,22 +222,21 @@ Backend 会在以下事件发生时发送 Telegram 通知:
 | `source_title` | VARCHAR(500) | | 原始新闻标题 |
 | `source_content` | TEXT | | 原始新闻正文(供编辑对照) |
 | `source_site` | VARCHAR(100) | | 来源站点名称(如 "TechCrunch") |
-| ➕ `source_published_at` | TIMESTAMPTZ | | 原文在源站点的发布时间(与 `published_at` 区分) |
+| `source_published_at` | TIMESTAMPTZ | | 原文在源站点的发布时间(与 `published_at` 区分) |
 | `ai_title` | VARCHAR(500) | NOT NULL | AI 生成的标题(编辑可修改) |
 | `ai_content` | TEXT | NOT NULL | AI 生成的正文(编辑可修改) |
 | `ai_summary` | VARCHAR(280) | | AI 生成的摘要(用于 Twitter,≤280 字符) |
-| ➕ `content_type` | VARCHAR(20) | NOT NULL, DEFAULT 'ARTICLE' | 分发路由:`ARTICLE` 走 WordPress+Twitter,`SHORT` 直发 Twitter(已确认) |
+| `content_type` | VARCHAR(20) | NOT NULL, DEFAULT 'ARTICLE' | 分发路由:`ARTICLE` 走 WordPress+Twitter,`SHORT` 直发 Twitter(已确认) |
 | `status` | VARCHAR(20) | NOT NULL, DEFAULT 'PENDING' | 见下方"状态机"小节 |
 | `rejection_reason` | TEXT | | 驳回原因(`status=REJECTED` 时填写) |
 | `reviewed_by` | UUID | FK → users.id | 审核人 |
 | `published_at` | TIMESTAMP | | 我们系统发布到外站的时间 |
 | `wp_post_id` | INTEGER | | WordPress 文章 ID(发布回执) |
-| ➕ `wp_url` | TEXT | | WordPress 完整 URL(前端展示用,光有 ID 不能直接点开) |
+| `wp_url` | TEXT | | WordPress 完整 URL(前端展示用,光有 ID 不能直接点开) |
 | `tweet_id` | VARCHAR(50) | | Twitter 推文 ID(发布回执) |
 | `created_at` | TIMESTAMP | DEFAULT NOW() | 入库时间 |
 | `updated_at` | TIMESTAMP | DEFAULT NOW(), ON UPDATE | 最后修改时间 |
 
-`➕` 标记的为相对原版**新增**的字段。
 
 ---
 
@@ -247,12 +246,12 @@ Backend 会在以下事件发生时发送 Telegram 通知:
 | :--- | :--- | :--- | :--- |
 | `id` | UUID | PK | 主键 |
 | `username` | VARCHAR(50) | UNIQUE, NOT NULL | 登录用户名 |
-| ➕ `email` | VARCHAR(255) | UNIQUE, NOT NULL | 邮箱(密码重置 / 唯一标识) |
+| `email` | VARCHAR(255) | UNIQUE, NOT NULL | 邮箱(密码重置 / 唯一标识) |
 | `password_hash` | VARCHAR(255) | NOT NULL | bcrypt 哈希后的密码 |
 | `display_name` | VARCHAR(100) | | 显示名称(UI 展示用,不直接暴露登录名) |
 | `role` | VARCHAR(20) | DEFAULT 'editor' | 角色:`editor` / `admin` |
 | `created_at` | TIMESTAMP | DEFAULT NOW() | 创建时间 |
-| ➕ `updated_at` | TIMESTAMP | DEFAULT NOW(), ON UPDATE | 最后修改时间(标准审计字段) |
+| `updated_at` | TIMESTAMP | DEFAULT NOW(), ON UPDATE | 最后修改时间(标准审计字段) |
 
 ---
 
