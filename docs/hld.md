@@ -52,7 +52,13 @@
 **Responsibility**:
 Agent 模块负责从外部的新闻源抓取新闻并且调用 AI 改写,将处理后的新闻数据通过 Webhook 推送到后端。
 
-> ❓ **思考**: 不同栏目对应不同 keyword(例如医疗),做关键词匹配 filter + 语义匹配(意思相关度高就会被筛选到),用 AI prompt 实现。
+**Category 分配机制**:Agent 用 AI 关键词匹配 + 语义匹配判断每篇文章属于哪个 `category`(`categories` 表中的话题分类,如 Medical / Politics / Finance / AI)。每个 category 在 admin 配置时关联一组 keyword,Agent 抓到原文后:
+
+1. 关键词预筛(快速过滤明显不相关的)
+2. 调 Claude API 用 prompt:_"下面这篇文章属于以下 categories 中的哪一个?[列表]。返回最匹配的一个 category name 和匹配置信度 0-1"_
+3. 取置信度最高的 category 作为这篇文章的归属
+
+**每篇文章对应一个 category**(MVP 简化,不做多对多),Webhook 提交时把 `category` name 一起送给 Backend。
 
 **Input**:
 - source 名称
@@ -104,13 +110,25 @@ flowchart TD
 
 Agent 输出结构化新闻数据,包括:
 - 原始新闻链接(`source_url`)
-- 原始标题
-- 原始正文
-- 来源信息(`source_site`)
-- 原新闻发布时间(`published_at`)
-- AI 改写后的标题
-- AI 改写后的正文
-- AI 生成的摘要
+- 原始标题(`source_title`)
+- 原始正文(`source_content`)
+- 来源信息(`source_site`)—— 原始网站,如 "Reuters"
+- 原新闻在源站点的发布时间(`source_published_at`)
+- AI 改写后的标题(`ai_title`)
+- AI 改写后的正文(`ai_content`)
+- AI 生成的摘要(`ai_summary`)
+- **AI 判定的话题分类(`category` name)** —— 如 "Medical",Backend 解析为 `category_id` 后入库
+
+**Edge cases(category 分配)**:
+
+| 场景 | 处理 |
+|---|---|
+| 一篇匹配多个 category(置信度都不低) | Agent 选**置信度最高**的那个,只送一个 `category` |
+| 所有 category 都不匹配(最高置信度 < 阈值,如 < 0.5) | Agent **跳过**这篇,不发 webhook,日志记录"unclassifiable" |
+| Backend 收到不存在的 `category` name(如 admin 改了 category 名但 Agent 配置没同步) | Backend 返回 `400 Bad Request`,Agent 记录后跳过,**同时 Telegram 告警** |
+| Agent 抓到符合多 category 的文章但都不强 | 同"所有 category 都不匹配",跳过更安全(避免错分类污染编辑列表) |
+
+> 🚧 **TODO**: 置信度阈值定多少?初步建议 0.5,跑起来后调整。
 
 ---
 
@@ -172,7 +190,7 @@ Backend 接收 webhook 传来的数据后,会先对原始新闻数据进行**标
    - 请求中带上编辑修改后的内容和 `content_type`
    - Backend 收到请求后,先从用户身份信息(JWT)中获取 `user_id`,并**校验 `content_type` 不为 NULL**(`content_type` 在 schema 中是 nullable,但发布时必填,缺失返回 `422 Validation Error`)
    - 校验通过后,Backend 把编辑修改写入 `edited_*` 字段、记录 `reviewed_by = user_id`,并把 `status` 更新为 `PUBLISHING`
-   - 随后 Backend 根据 `content_type` 选择发布路径(发布时**优先使用 `edited_*`,若 NULL 则 fallback 使用 `ai_*`**):
+   - 随后 Backend 根据 `content_type` 选择发布路径(**发布只读 `edited_*`** —— 前端预填保证 publish 时 `edited_*` 必有值,Backend 在 publish action 入口校验非 NULL,缺失返 `422`):
      - **ARTICLE**: 先发布到 WordPress,成功后保存 `wp_post_id` + `wp_url`,再将该链接发布到 Twitter
      - **SHORT**: 直接发布到 Twitter(用 summary 内容)
    - 最后 Backend 根据发布结果更新新闻的最终状态(`PUBLISHED` 或 `FAILED`)
@@ -183,7 +201,17 @@ Backend 接收 webhook 传来的数据后,会先对原始新闻数据进行**标
 
 ##### Publishing processing
 
-在发布过程中,如果 WordPress 或 Twitter API 调用失败,Backend 会根据 retry 策略进行有限次数重试。如果重试后仍然失败,Backend 会把新闻 `status` 更新为 `FAILED`,并把错误详情写入文章的错误字段(per-platform 错误字段的最终方案见 Database Module 的 Open Schema Decisions #2),供 admin 后续手动 retry。MVP 阶段不引入独立的 `publish_logs` 表,完整重试历史推迟到 Phase 2。
+在发布过程中,Backend 用 per-platform 字段精确追踪每个外站的发布状态:
+
+- **WP**:`wp_status` / `wp_error` / `wp_post_id` / `wp_url` / `wp_published_at`
+- **Twitter**:`tweet_status` / `tweet_error` / `tweet_id` / `tweet_published_at`
+- **整体**:`status` 是聚合 —— `PUBLISHED`(全部成功)/ `FAILED`(任一失败)/ `PUBLISHING`(进行中)
+
+若 WordPress 或 Twitter API 调用失败,Backend 把对应平台的 `*_status` 标记为 `FAILED`,把错误信息写入 `*_error`,然后根据 retry 策略进行有限次数重试。如果重试后仍然失败,整体 `status` 更新为 `FAILED`,供 admin 后续手动 retry。
+
+**手动 retry 时的关键行为**:Backend 读 `wp_status` / `tweet_status`,**只重试 `FAILED` 的平台,跳过已 `PUBLISHED` 的**(避免重复发 WP 文章或重复发推)。重试接口加 `Idempotency-Key` header 防止重复点击触发的重发。
+
+MVP 阶段不引入独立的 `publish_logs` 表(完整重试历史 Phase 2 加),当前 `*_error` 字段只保存**最后一次失败**的错误信息。
 
 ##### Notifying processing
 
@@ -225,13 +253,13 @@ Backend 会在以下事件发生时发送 Telegram 通知:
 flowchart TD
     Login[编辑登录] --> Dashboard["Dashboard<br/>展示分配 category 下的<br/>PENDING 文章"]
     Dashboard -.->|可选预览| Preview[Article Preview]
-    Preview --> Edit["编辑标题 / 正文<br/>(显示 edited_* 或 fallback ai_*)"]
+    Preview --> Edit["编辑标题 / 正文<br/>(显示 edited_*,首次打开时<br/>前端用 ai_* 预填表单)"]
     Dashboard --> Edit
     Edit --> SelectType[选择 content_type<br/>ARTICLE / SHORT]
     SelectType -.->|可选| Save["保存<br/>(写入 edited_title/<br/>edited_content/edited_summary<br/>ai_* 不被覆盖<br/>status 保持 PENDING)"]
     Save -.-> Edit
     SelectType --> Publish["点击 Publish<br/>(content_type 必填,缺失 422)"]
-    Publish --> Backend["Backend:<br/>status → PUBLISHING<br/>触发分发(用 edited_* 或<br/>fallback ai_*)"]
+    Publish --> Backend["Backend:<br/>status → PUBLISHING<br/>触发分发(只用 edited_*)"]
 
     Dashboard --> Reject[Reject]
     Edit --> Reject
@@ -314,16 +342,16 @@ Available actions:
 When an editor opens an article for editing, the system shows the editing workspace.
 
 The editing page may include:
-- Editable article title(显示 `edited_title`,若 NULL 则 fallback 显示 `ai_title`)
-- Editable article content(显示 `edited_content`,若 NULL 则 fallback 显示 `ai_content`)
-- Editable summary(显示 `edited_summary`,若 NULL 则 fallback 显示 `ai_summary`)
+- Editable article title(显示 `edited_title`;首次打开文章时前端把 `ai_title` 预填到表单)
+- Editable article content(显示 `edited_content`;首次打开时前端用 `ai_content` 预填)
+- Editable summary(显示 `edited_summary`;首次打开时前端用 `ai_summary` 预填)
 - AI 原文对照视图(只读,展示 `ai_title` / `ai_content` / `ai_summary`)
 - Content type dropdown selection (`ARTICLE` / `SHORT`)
 - Save button(写入 `edited_*` 字段,`status` 保持 `PENDING`,`ai_*` 不被覆盖)
 - Publish button
 - Reject button
 
-> **重置回 AI 原版**:editor 可清空 `edited_*` 字段(对应 UI 上的"恢复 AI 原版"按钮),清空后页面显示自动 fallback 到 `ai_*`。
+> **重置回 AI 原版**:editor 可点"恢复 AI 原版"按钮,前端把 `ai_*` 内容重新填进表单输入框,save / publish 时 `edited_*` 会被覆盖成与 `ai_*` 一样的内容。
 
 ##### Frontend Validation Rules
 
@@ -416,7 +444,13 @@ erDiagram
         TIMESTAMPTZ published_at
         INTEGER wp_post_id
         TEXT wp_url
+        VARCHAR wp_status
+        TEXT wp_error
+        TIMESTAMPTZ wp_published_at
         VARCHAR tweet_id
+        VARCHAR tweet_status
+        TEXT tweet_error
+        TIMESTAMPTZ tweet_published_at
         TIMESTAMPTZ created_at
         TIMESTAMPTZ updated_at
     }
@@ -449,25 +483,31 @@ erDiagram
 | `ai_title` | VARCHAR(500) | NOT NULL | AI 生成的**原始**标题(**不被覆盖**) |
 | `ai_content` | TEXT | NOT NULL | AI 生成的**原始**正文(**不被覆盖**) |
 | `ai_summary` | VARCHAR(280) | | AI 生成的**原始**摘要(用于 Twitter,≤280 字符,**不被覆盖**) |
-| `edited_title` | VARCHAR(500) | | 编辑修改后的标题(NULL = 未修改;前端 fallback 显示 `ai_title`,发布时也 fallback) |
-| `edited_content` | TEXT | | 编辑修改后的正文(NULL = 未修改;fallback 用 `ai_content`) |
-| `edited_summary` | VARCHAR(280) | | 编辑修改后的摘要(NULL = 未修改;fallback 用 `ai_summary`) |
+| `edited_title` | VARCHAR(500) | | 编辑修改后的标题。前端打开文章时把 `ai_title` 预填到表单,提交时一定有值。Webhook 刚入库时为 NULL(未被编辑打开过) |
+| `edited_content` | TEXT | | 编辑修改后的正文(同上规则) |
+| `edited_summary` | VARCHAR(280) | | 编辑修改后的摘要(同上规则) |
 | `content_type` | VARCHAR(20) | **NULLABLE** | 分发路由:`ARTICLE` 走 WordPress+Twitter,`SHORT` 直发 Twitter。**Nullable**;发布前必填,后端在 publish action 时校验,缺失返回 `422` |
 | `status` | VARCHAR(20) | NOT NULL, DEFAULT 'PENDING' | 见下方"状态机"小节 |
 | `rejection_reason` | TEXT | | 驳回原因(`status=REJECTED` 时填写) |
 | `reviewed_by` | UUID | FK → users.id | 审核人 |
-| `published_at` | TIMESTAMPTZ | | 系统发布到外站的时间 |
+| `published_at` | TIMESTAMPTZ | | 整体发布成功的时间(整体 `status` 第一次进入 `PUBLISHED` 时记录) |
 | `wp_post_id` | INTEGER | | WordPress 文章 ID(发布回执) |
 | `wp_url` | TEXT | | WordPress 完整 URL(前端展示用) |
+| `wp_status` | VARCHAR(20) | | WP 单平台状态:`PENDING` / `PUBLISHING` / `PUBLISHED` / `FAILED`。`SHORT` 类型时为 NULL(不发 WP) |
+| `wp_error` | TEXT | | WP 发布失败时的错误信息(成功 / 未尝试时为 NULL) |
+| `wp_published_at` | TIMESTAMPTZ | | WP 实际发布成功的时间 |
 | `tweet_id` | VARCHAR(50) | | Twitter 推文 ID(发布回执) |
+| `tweet_status` | VARCHAR(20) | | Twitter 单平台状态(同 wp_status 取值) |
+| `tweet_error` | TEXT | | Twitter 发布失败时的错误信息 |
+| `tweet_published_at` | TIMESTAMPTZ | | Twitter 实际发布成功的时间 |
 | `created_at` | TIMESTAMPTZ | DEFAULT NOW() | 入库时间 |
 | `updated_at` | TIMESTAMPTZ | DEFAULT NOW(), ON UPDATE | 最后修改时间(**用于 optimistic concurrency 版本检查**) |
 
 **字段读 / 写规则**:
 - **AI 原文不被覆盖**:`ai_title` / `ai_content` / `ai_summary` 永远保留 webhook 入库时的原始 AI 生成内容
-- **编辑修改写入 `edited_*`**:editor 在 save / publish action 时,backend 把编辑改动写入 `edited_title` / `edited_content` / `edited_summary`
-- **前端展示 fallback**:前端展示文章时,`edited_*` 字段为 NULL 则显示 `ai_*` 对应字段;非 NULL 则显示 `edited_*`
-- **发布 fallback**:发布到 WordPress / Twitter 时,优先用 `edited_*`,为 NULL 则用 `ai_*`
+- **前端预填表单**:前端 GET 文章时,如果 `edited_*` 字段为 NULL(还没人打开过),把 `ai_*` 内容预填到编辑表单输入框。**所有编辑界面的展示统一从 `edited_*` 读取**(NULL 时由前端预填层把 `ai_*` 灌进去)
+- **编辑修改写入 `edited_*`**:editor 在 save / publish action 时,backend 把表单内容写入 `edited_title` / `edited_content` / `edited_summary`。**即使 editor 没改任何东西,前端也会把预填的 `ai_*` 内容回传保存**,所以 save / publish 之后 `edited_*` 必定有值
+- **发布只用 `edited_*`**:发布到 WordPress / Twitter 一律读 `edited_*`,**不做 fallback**。Backend 在 publish action 时校验 `edited_*` 非 NULL(`ARTICLE` 要求 `edited_title` + `edited_content`,`SHORT` 要求 `edited_summary`),缺失返回 `422`
 
 > 🚧 **TODO**: `category_id` 在 webhook 入库时由谁决定?(选项:Agent 自己分类 / Backend 默认 "Uncategorized" / Backend 调用 AI 自动归类。需后续讨论。)
 
@@ -520,20 +560,31 @@ editor 与 category 的多对多关联表,决定 editor 在前端能看到哪些
 
 **何时设置**:`content_type` 字段是 nullable,默认 NULL。Editor 在编辑界面选择 `ARTICLE` 或 `SHORT`,后端在 publish action 时校验非 NULL(缺失返回 `422`)。
 
-**发布时取值**:发布到外站使用编辑修改 fallback 规则 —— `edited_*` 字段为 NULL 则用 `ai_*` 对应字段。
+**发布时取值**:发布到外站**只读 `edited_*` 字段**(前端预填保证 `edited_*` 在 publish 时必定有值)。Backend publish action 前校验 `edited_*` 非 NULL,缺失返回 `422`。
 
 ```
 content_type = 'ARTICLE':
-  → 1. 发布到 WordPress,使用 (edited_title || ai_title) + (edited_content || ai_content)
-  → 2. 拿 wp_post_id + wp_url,用 wp_url 发推到 Twitter
-  → status: PUBLISHING → PUBLISHED (两者都成功)
-  → 失败: PUBLISHING → FAILED
+  → 1. wp_status: PUBLISHING
+       发布到 WordPress,使用 edited_title + edited_content
+       成功:wp_status=PUBLISHED, wp_post_id, wp_url, wp_published_at
+       失败:wp_status=FAILED, wp_error 记录原因
+  → 2. 若 WP 成功 → tweet_status: PUBLISHING
+       拿 wp_url 发推到 Twitter
+       成功:tweet_status=PUBLISHED, tweet_id, tweet_published_at
+       失败:tweet_status=FAILED, tweet_error 记录原因
+  → 3. 整体 status:
+       两者都 PUBLISHED → status=PUBLISHED, published_at 记录时间
+       任一 FAILED → status=FAILED
 
 content_type = 'SHORT':
-  → 1. 直接发推到 Twitter,使用 (edited_summary || ai_summary)
-  → status: PUBLISHING → PUBLISHED
-  → wp_post_id / wp_url 字段保持 NULL
+  → 1. wp_status / wp_post_id / wp_url / wp_published_at 全部保持 NULL
+  → 2. tweet_status: PUBLISHING
+       直接发推到 Twitter,使用 edited_summary
+       成功:tweet_status=PUBLISHED, tweet_id, tweet_published_at, status=PUBLISHED
+       失败:tweet_status=FAILED, tweet_error, status=FAILED
 ```
+
+**重试时**:Backend 根据 per-platform `wp_status` / `tweet_status` 智能跳过已成功的平台,只重试 FAILED 的(避免重复发 WP / Twitter)。详见 Backend Module 的 Publishing processing。
 
 ---
 
@@ -553,9 +604,21 @@ MVP 必须支持两种发布类型:正式文章(ARTICLE,走 WP+Twitter)和短讯
 
 **为什么用 `edited_*` 字段而不是覆盖 `ai_*`?**
 - 保留 AI 原文便于编辑对照(前端"原文 vs 修改后"对比视图直接用 `ai_*` vs `edited_*`)
-- 任何时候都能"回到 AI 原版重新写"(editor 清空 `edited_*` 即可)
+- 任何时候都能"回到 AI 原版重新写"(editor 复制 `ai_*` 到表单覆盖即可)
 - 不需要单独的 `article_versions` 表也能保留最基本的"原始 vs 当前"两个版本
-- 前端 / 发布逻辑用 fallback:`edited_*` 为 NULL 时回退到 `ai_*`
+
+**为什么用 frontend 预填 + 发布只读 `edited_*`(而不是 backend fallback)?**
+- **代码简洁**:每个使用文章内容的地方(发布到 WP / Twitter / 邮件 digest / 报表 / 搜索)只读一个字段,**不用每处都写 `COALESCE(edited_*, ai_*)`**
+- **减少 bug 面**:新人加 feature 时不会忘记 fallback;PR review 不需要每次都检查 fallback 逻辑
+- **查询性能**:`WHERE edited_title ILIKE '...'` 走索引;fallback 方案的 `WHERE COALESCE(edited_title, ai_title) ILIKE '...'` 不走索引
+- **存储代价微不足道**:edited_* 在"editor 没改"的情况下和 ai_* 内容一样,多存一份;但 MVP 阶段一年也就几十 MB,相比代码复杂度收益完全值得
+
+**为什么加 per-platform 状态字段(`wp_status` / `wp_error` / `tweet_status` / `tweet_error` 等)?**
+- 解决"WP 成功 + Twitter 失败"场景的重试问题:**单 `status` 字段无法表达哪个平台成功了**,重试时容易把已成功的 WP 文章重复发一次
+- 加 per-platform 字段后,Backend 在 retry 时能精确知道"WP 已成功,只重发 Twitter",**杜绝重复发布**
+- 每个平台单独的 `error` 字段方便编辑 / admin 看到具体哪里出问题(Twitter rate limit?WP 主题渲染失败?)
+- per-platform `published_at` 方便追溯每个平台的真实发布时间
+- 整体 `status` 字段作为聚合视图保留,前端简单查询用
 
 **为什么加 `source_published_at`?**
 要区分"原文何时发布"和"我们何时转发布"。同一个字段表达不了两个语义。
@@ -632,14 +695,14 @@ PENDING → REJECTED → PENDING                (可选,重新提交)
 | # | 问题 | 选项 | 优先级 / 状态 |
 |---|---|---|---|
 | 1 | **状态机的枚举值与流转** | ✅ **已决**:`PENDING` / `PUBLISHING` / `PUBLISHED` / `FAILED` / `REJECTED`(无 DRAFT)| ✅ 已决 |
-| 2 | **per-platform 状态字段**:是否在 `news_articles` 加 `wp_status` / `tweet_status` / `wp_error` / `tweet_error` 等列 | A. 不加,只用单一 `status` / B. 加,精确追踪每平台 | 🟡 中 |
+| ~~2~~ | ~~per-platform 状态字段~~ | ✅ **已决**:**加** `wp_status` / `wp_error` / `wp_published_at` / `tweet_status` / `tweet_error` / `tweet_published_at` 共 6 个 nullable 字段。理由:解决"WP 成功 / Twitter 失败"重试时重复发布的问题,见上方"设计决策" | ✅ 已决 |
 | 3 | **并发编辑保护字段** | ✅ **已决**:不加 `claimed_by` / `claimed_at`,改用 optimistic concurrency(后端 / ORM 用 `updated_at` 做版本检查) | ✅ 已决 |
 | 4 | **`ai_summary` 长度约束**:`VARCHAR(280)` 对中文是否够 | Twitter 限 280 字符,中文按字算 + t.co 链接 23 字符 → 实际安全 ≤ 250 中文字符,可能要改 `VARCHAR(250)` | 🟢 低 |
 | 5 | **软删字段**:是否加 `deleted_at` 列 | A. 硬删,不加 / B. 软删(在 `news_articles` / `users` / `categories` 加 `deleted_at TIMESTAMPTZ`) | 🟢 低(MVP 阶段可后议) |
 | 6 | **`updated_by` 字段**:是否在 `news_articles` 加 `updated_by UUID FK→users.id` | A. 不加(`reviewed_by` 够了)/ B. 加,记录最后编辑人 | 🟢 低 |
-| 7 | **`category_id` 入库时谁决定** | A. Agent 自己分类 / B. Backend 默认 "Uncategorized" / C. Backend 调 AI 归类 | 🟡 中(影响 Agent 接口与 Backend 逻辑) |
+| ~~7~~ | ~~`category_id` 入库时谁决定~~ | ✅ **已决**:A. Agent 通过 AI 关键词+语义匹配判断 category,webhook 传 `category` name,Backend 解析为 `category_id`。边界情况见 Agent Module 的 Edge cases 小节 | ✅ 已决 |
 
-> 💡 **状态**:#1 和 #3 已敲定;剩 #2 和 #7 可以本周内决定;#4-6 等开始写代码时再决定。
+> 💡 **状态**:#1 / #2 / #3 / #7 已敲定;剩 #4-6 等开始写代码时再决定。
 
 ##### Phase 2 推迟项(MVP 不做,后续可演进)
 
