@@ -322,26 +322,29 @@ Directus 配置 OIDC,指向 Authentik(详见 Authentik 章节)。
 
 ##### Editor Interaction Flow
 
-编辑在工作台的完整动线:
+编辑在 Directus Data Studio 里的完整动线:
 
 ```mermaid
 flowchart TD
-    Login[编辑登录] --> Dashboard["Dashboard<br/>展示分配 category 下的<br/>PENDING 文章"]
-    Dashboard -.->|可选预览| Preview[Article Preview]
-    Preview --> Edit["编辑标题 / 正文<br/>(显示 edited_*,首次打开时<br/>前端用 ai_* 预填表单)"]
-    Dashboard --> Edit
-    Edit --> SelectType[选择 content_type<br/>ARTICLE / SHORT]
-    SelectType -.->|可选| Save["保存<br/>(写入 edited_title/<br/>edited_content/edited_summary<br/>ai_* 不被覆盖<br/>status 保持 PENDING)"]
-    Save -.-> Edit
-    SelectType --> Publish["点击 Publish<br/>(content_type 必填,缺失 422)"]
-    Publish --> Backend["Backend:<br/>status → PUBLISHING<br/>触发分发(只用 edited_*)"]
+    Login["编辑登录<br/>(Authentik OIDC)"] --> Studio["Directus Data Studio<br/>展示 PENDING 文章<br/>(item-level permission:<br/>只显示 user.assigned_categories)"]
+    Studio -.->|可选预览| Preview[Article 详情视图]
+    Preview --> Edit[打开编辑]
+    Studio --> Edit
+    Edit --> Modify["改 final_* 字段<br/>(初始内容 = ai_*,<br/>由 Directus afterCreate hook<br/>入库时复制)"]
+    Modify --> SelectType[选 content_type<br/>ARTICLE / SHORT]
+    SelectType -.->|可选 Save| SaveOp["PATCH /items/articles/{id}<br/>final_* 写入<br/>status 保持 PENDING<br/>Directus Revisions 自动版本化"]
+    SaveOp -.-> Modify
+    SelectType --> Publish[点 Publish<br/>status → PUBLISHING]
+    Publish --> Hook["Directus beforeUpdate hook:<br/>校验 content_type 非 NULL<br/>校验 status 转移合法"]
+    Hook --> Flow["Directus Flow webhook"]
+    Flow --> N8N["n8n publish-article workflow:<br/>发到 WP / Twitter<br/>回写 wp_* / tweet_* / status"]
 
-    Dashboard --> Reject[Reject]
-    Edit --> Reject
-    Reject --> BackendReject["Backend:<br/>status → REJECTED<br/>记录 rejection_reason"]
+    Studio --> Reject[Reject 填 rejection_reason]
+    Modify --> Reject
+    Reject --> RejectFlow["Directus status=REJECTED<br/>Flow → n8n send-notification<br/>→ Telegram"]
 ```
 
-> 实线 = 必经路径,虚线 = 可选分支。**并发冲突**:若后端检测 `updated_at` 不一致,返回 `409`,前端提示刷新并重新编辑。
+> 实线 = 必经路径,虚线 = 可选分支。**并发冲突**:Directus 内置 optimistic concurrency 检测,若有人在你 open 之后修改过同一篇,save 时返回 `409 Conflict`,Data Studio 自动提示刷新。
 
 ##### Sidebar Navigation
 
@@ -414,26 +417,27 @@ Available actions:
 
 ##### Article Editing Page
 
-When an editor opens an article for editing, the system shows the editing workspace.
+编辑文章的视图(在 Directus Data Studio 里):
 
-The editing page may include:
-- Editable article title(显示 `edited_title`;首次打开文章时前端把 `ai_title` 预填到表单)
-- Editable article content(显示 `edited_content`;首次打开时前端用 `ai_content` 预填)
-- Editable summary(显示 `edited_summary`;首次打开时前端用 `ai_summary` 预填)
-- AI 原文对照视图(只读,展示 `ai_title` / `ai_content` / `ai_summary`)
-- Content type dropdown selection (`ARTICLE` / `SHORT`)
-- Save button(写入 `edited_*` 字段,`status` 保持 `PENDING`,`ai_*` 不被覆盖)
-- Publish button
-- Reject button
+- **Editable `final_title` / `final_content` / `final_summary`** —— 直接编辑,内容初始值由 Directus `afterCreate` lifecycle hook 入库时自动从 `ai_*` 复制(不需要前端做 fallback 逻辑)
+- **AI 原文对照视图** —— 只读,展示 `ai_title` / `ai_content` / `ai_summary`(Data Studio 字段配置时把 `ai_*` 设为 read-only)
+- **`source_*` 原文** —— 只读,可选择性显示(供编辑核对事实)
+- **Content type dropdown**(`ARTICLE` / `SHORT`)
+- **Save button** —— PATCH `final_*`,`status` 保持 `PENDING`,Directus Revisions 自动记录历史
+- **Publish button** —— 改 `status` → `PUBLISHING`,触发 Directus beforeUpdate hook 校验 + Flow webhook
+- **Reject button** —— 改 `status` → `REJECTED`,填 `rejection_reason`
+- **Revisions tab**(Directus 自带)—— 看历史版本,可以 restore 回任何之前版本
 
-> **重置回 AI 原版**:editor 可点"恢复 AI 原版"按钮,前端把 `ai_*` 内容重新填进表单输入框,save / publish 时 `edited_*` 会被覆盖成与 `ai_*` 一样的内容。
+> **重置回 AI 原版**:editor 在 Revisions tab 里找到 **第一条 revision**(就是入库时 `final_* = ai_*` 的版本),点 restore 即可。**不需要"恢复 AI 原版"专门按钮**,Directus 自带的 Revisions 功能直接覆盖此场景。
 
 ##### Frontend Validation Rules
 
-- Editors **must select a `content_type` before publishing** an article(`content_type` 在 schema 中是 nullable,但 publish action 时后端校验非 NULL,缺失返回 `422`)。
-- The Publish button should remain disabled until `content_type` is selected.
-- Editors may save edits without publishing (`status` remains `PENDING`,内容写入 `edited_*` 字段,`ai_*` 永远保留为原文)。
-- **Concurrent edits**:Edits use **optimistic concurrency**(后端检查 `updated_at`)。若有人在你 open 之后修改过同一篇,save / publish 时后端返回 `409 Conflict`,前端提示用户刷新并重新编辑。
+- **Editors must select a `content_type` before publishing**(`content_type` schema 中 nullable,但 Directus `beforeUpdate` hook 在 status 转 `PUBLISHING` 时校验非 NULL,缺失阻止转移并返回 `422`)
+- **Publish button 应在 `content_type` 未选时 disabled**(Data Studio 通过 conditional field 实现)
+- **Editors may save edits without publishing** —— PATCH `final_*` 即可,`status` 保持 `PENDING`,Directus Revisions 自动版本化
+- **Concurrent edits**:Directus 内置 optimistic concurrency —— 若你 open 之后有人改过同一篇,save 时返回 `409 Conflict`,Data Studio 自动提示刷新
+- **Permission 自动应用**:editor 只能 R/W `category ∈ user.assigned_categories` 的 article(Directus item-level permission,**不在前端写校验**,后端 enforce)
+- **`source_*` / `ai_*` 字段对所有 role 都是 read-only**(在 Directus Permissions 里配置,从源头防止误改)
 
 ##### Published Page
 
