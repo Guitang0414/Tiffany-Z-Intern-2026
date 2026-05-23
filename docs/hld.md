@@ -6,7 +6,7 @@
 > - `HL-Intern-Project.md` 偏 **spec**(已敲定的技术选型、schema、API、里程碑)
 > - 本文档偏 **design**(模块责任拆解、设计思路、未决问题)
 >
-> 当前状态:**草稿,持续完善中**。Backend Module 已较完整;Frontend / Database / Distribution / DFD / Interface Design / Deployment 等章节待补。
+> 当前状态:**MVP 架构定稿,采用 Directus-first**(Authentik + Hermes Agent + Directus + n8n + PostgreSQL,NestJS 为 Phase 2 候选)。所有主要章节均已填充,部分小决策(`ai_summary` 用途、`final_*` vs Directus Revisions 等)待 mentor 确认或 spike 时定稿,见 Database Module 的 Open Schema Decisions。
 >
 > 文档中的标注:
 > - `> 🚧 TODO`: 待填写或待细化
