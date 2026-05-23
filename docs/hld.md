@@ -346,74 +346,59 @@ flowchart TD
 
 > 实线 = 必经路径,虚线 = 可选分支。**并发冲突**:Directus 内置 optimistic concurrency 检测,若有人在你 open 之后修改过同一篇,save 时返回 `409 Conflict`,Data Studio 自动提示刷新。
 
-##### Sidebar Navigation
+##### Editor 在 Data Studio 里的视图
 
-The editor dashboard contains a left sidebar navigation for quick access to different article workflows and states.
+> Directus Data Studio **自动渲染 admin UI**,我们**不写前端代码,只配置**。下面是要在 Directus 里配的内容(side bar 显示、字段权限、列表 preset、看板)。
 
-Navigation items:
-- Dashboard
-- Available Articles
-- Published
-- Failed
+**Sidebar Navigation**(editor role 可见):
+- 📰 **Articles**(主工作区)
+- 🏷️ **Categories**(只读,看 admin 维护的分类列表)
+- 📊 **Dashboard / Insights**(自定义看板)
 
-> **备注**:MVP 没有独立的 "My Drafts" 页 —— 没有 DRAFT 状态,所有"编辑改过但还没发布"的稿子都是 `PENDING`,直接出现在 Available Articles 里。
+> ⚠️ **MVP 没有独立的 "My Drafts" 入口** —— 没有 DRAFT 状态,所有"编辑改过但还没发布"的稿子都是 `PENDING`,在 Articles 列表里用 saved preset 看就行。
 
-##### Dashboard Overview Page
+---
 
-The dashboard overview page provides editors with a quick summary of their workload and recent activity.
+**Articles 列表视图配置**:
 
-The dashboard acts as an overview hub instead of a full article management page.
+| 配置项 | 设置 |
+|---|---|
+| **Item-level filter**(权限层强制,后端 enforce) | `category ∈ current_user.assigned_categories` —— editor 看不到不属于自己 category 的文章 |
+| **默认 saved presets**(Directus bookmark) | "Pending(待审)" `status=PENDING` / "Recently Published" `status=PUBLISHED, sort by -published_at` / "Failed(需 retry)" `status=FAILED` |
+| **列表显示字段** | title / status(色块)/ category(色块,话题色)/ source_site(原始网站)/ created_at |
+| **可用 filter** | `status` / `category` / `source_site` / `content_type` / 日期范围 |
+| **Search** | 全文搜 `final_title` / `source_title` |
+| **排序** | 默认按 `created_at DESC`(最新优先) |
 
-The overview page may include:
-- Recent `PENDING` articles in the editor's assigned categories
-- Recent activity (recently published / rejected, etc.)
-- Quick statistics
+> **`source_site` 和 `category` 是不同维度**:`source_site = "Reuters"`(原网站),`category = "Politics"`(话题分类)。列表里**两个都显示** + **两个都能 filter**。
 
-Each section may display only a small number of recent items with a "View All" action that redirects to the corresponding full page.
+---
 
-##### Available Articles Page
+**Articles 详情 / 预览视图**(Directus 默认 item detail page):
 
-The Available Articles page displays the full list of `PENDING` articles from categories assigned to the current editor.
+Data Studio 自动展示所有字段,**按字段权限决定可见 / 可编辑**(下方 Article Editing Page 详述)。
 
-This page may support:
-- Pagination
-- Search
-- Filtering (by `category`, `source_site`, `content_type`)
-- Sorting
+- Source 字段(`source_*`):只读,供编辑核对原文
+- AI 字段(`ai_*`):只读,对照看
+- Final 字段(`final_*`):可编辑(editing 视图)
+- 分发字段(`wp_*` / `tweet_*` / `published_at` 等):只读
 
-Each article row may display:
-- Article title
-- **Category tag**(话题,如 "Politics")
-- **Source site**(原始网站,如 "Reuters")
-- Preview button
-- Edit button
+**Available actions**(由 Directus 默认 + 自定义 button 提供):
+- Edit(默认,直接进编辑模式)
+- Reject(自定义 action 改 `status = REJECTED`,弹窗填 `rejection_reason`)
+- Publish(自定义 action 改 `status = PUBLISHING`,触发 Flow webhook)
 
-Category should be displayed as a colored tag/label for quick identification.
+---
 
-Editors can:
-- Preview article details
-- Open an article for editing _(no claim required)_
+**Insights 看板**(自定义,给编辑日常用):
 
-##### Article Preview Page
+| 看板 | 给谁看 | 内容 |
+|---|---|---|
+| "My Pending" | editor | 自己 category 下的 `status=PENDING` 数量 + 最近 5 篇 |
+| "My Recent Activity" | editor | 本周 published / rejected / failed 计数 |
+| "Site Overview"(可选) | admin | 全站 status 分布、各 editor 工作量、发布失败率 |
 
-The preview page allows editors to review the full article information before editing.
-
-The preview page may include:
-- Article title
-- Original source name (`source_site`)
-- Original URL (`source_url`)
-- Original published time (`source_published_at`), if available
-- Crawled time (`created_at`)
-- Original article content (`source_content`)
-- AI rewritten title/content (`ai_title` / `ai_content`)
-- Current category (`category_id` → name)
-- Content type (`content_type`)
-- Related metadata from the agent
-
-Available actions:
-- Back to Available Articles
-- Edit
-- Reject article
+Directus Insights 自带 panel 类型(number / chart / table / metric),配置即可,**无需写代码**。
 
 ##### Article Editing Page
 
@@ -439,23 +424,18 @@ Available actions:
 - **Permission 自动应用**:editor 只能 R/W `category ∈ user.assigned_categories` 的 article(Directus item-level permission,**不在前端写校验**,后端 enforce)
 - **`source_*` / `ai_*` 字段对所有 role 都是 read-only**(在 Directus Permissions 里配置,从源头防止误改)
 
-##### Published Page
+##### "Published" / "Failed" 不是独立 page —— 是 saved presets
 
-The Published page displays articles successfully published.
+在 Directus Data Studio 里,"Published 文章" 和 "Failed 文章" **不需要独立 page**,**都是 Articles 列表的 saved preset**(bookmark)。
 
-Editors can:
-- View published article records
-- Check final category and content type
-- Open the published article link if available (`wp_url` / Twitter URL)
+| Preset 名 | Filter | 备注 |
+|---|---|---|
+| Pending(待审) | `status = PENDING` | editor 主要工作区 |
+| Recently Published | `status = PUBLISHED`,sort by `-published_at` | 看自己发出去的文章,可点 `wp_url` 直接访问 WP / Twitter |
+| Failed(需 retry) | `status = FAILED` | 看 `wp_error` / `tweet_error` 字段定位问题,点"Retry"自定义 action 触发 n8n retry workflow |
+| All My Articles | `reviewed_by = current_user` | 自己审过的所有文章 |
 
-##### Failed Publishing Page
-
-The Failed page displays articles that encountered publishing or distribution failures.
-
-Editors may:
-- View publishing error messages
-- Retry failed publishing tasks
-- Re-edit articles before retrying publishing
+**Retry 触发方式**:在 Failed preset 里,文章列表 / 详情页有一个**自定义 button "Retry"**(用 Directus custom interface / action),点击 → POST 到 n8n retry workflow webhook(带 `Idempotency-Key`),由 n8n 智能判断重发哪个平台(详见 Distribution Module)。
 
 ---
 
