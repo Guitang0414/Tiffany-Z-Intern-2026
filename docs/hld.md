@@ -152,18 +152,29 @@ flowchart TD
 
 **Output**:
 
-Agent 输出结构化新闻数据,包括:
-- 原始新闻链接(`source_url`)
-- 原始标题(`source_title`)
-- 原始正文(`source_content`)
-- 来源信息(`source_site`)—— 原始网站,如 "Reuters"
-- 原新闻在源站点的发布时间(`source_published_at`)
-- AI 改写后的标题(`ai_title`)
-- AI 改写后的正文(`ai_content`)
-- AI 生成的摘要(`ai_summary`)
-- **AI 判定的话题分类(`category` name)** —— 如 "Medical",Directus lifecycle hook 解析为 `category_id` 后入库
+Agent 把流程的结果打包成 JSON,**POST 到 Directus `/items/articles`**(用 Directus API Token 鉴权,放 `Authorization: Bearer <token>`)。
 
-**目标接口**:`POST /items/articles`(Directus auto-gen),用 Directus API Token 鉴权(`Authorization: Bearer <token>`)。
+**POST body 字段**(Agent 负责填):
+
+| 字段族 | 字段 | 说明 |
+|---|---|---|
+| 原始抓取 (`source_*`) | `source_url` / `source_title` / `source_content` / `source_site` / `source_published_at` | 直接从新闻源抓取 |
+| AI 改写 (`ai_*`) | `ai_title` / `ai_content` / `ai_summary` | Claude 改写后的内容 |
+| 分类 | `category`(**string**,如 `"Medical"`) | AI 判定的话题分类;**传 name 字符串**,Directus lifecycle hook 自动 resolve 成 `category_id` |
+
+**Agent 不负责的字段**(由 Directus / n8n / editor 后续填):
+
+| 字段 | 谁填 | 何时 |
+|---|---|---|
+| `final_title` / `final_content` / `final_summary` | Directus lifecycle hook(`afterCreate`) | 入库时自动 `final_* = ai_*` 初始化 |
+| `content_type` | Editor | 在 Data Studio 编辑时选 `ARTICLE` / `SHORT` |
+| `status` | Directus | 默认 `PENDING`(字段 default);后续由 editor action / n8n 改 |
+| `wp_*` / `tweet_*` | n8n publish workflow | 发布成功 / 失败时回写 |
+| `reviewed_by` | Editor publish action | 点 Publish 时 Directus 记录当前 user |
+| `published_at` | n8n | 整体 status 进入 `PUBLISHED` 时记录 |
+| `id` / `created_at` / `updated_at` | Directus | 自动生成 / 维护 |
+
+> 这样划分清楚是为了让以后写 Agent 代码的同学**知道自己该填什么、不该填什么**,避免 Agent 误填 status / final_* 等字段。
 
 **Edge cases(category 分配)**:
 
