@@ -101,18 +101,18 @@ Agent 模块负责从外部的新闻源抓取新闻并且调用 AI 改写,将处
 2. 调 Claude API 用 prompt:_"下面这篇文章属于以下 categories 中的哪一个?[列表]。返回最匹配的一个 category name 和匹配置信度 0-1"_
 3. 取置信度最高的 category 作为这篇文章的归属
 
-**每篇文章对应一个 category**(MVP 简化,不做多对多),Webhook 提交时把 `category` name 一起送给 Backend。
+**每篇文章对应一个 category**(MVP 简化,不做多对多),POST 到 Directus 时把 `category` name 一起送过去。
 
 **Input**:
-- source 名称
-- seed URLs
-- frequency
+- source 名称 / seed URLs / category 关键词配置(由 admin 或 config 提供)
+- **Cron 触发**:由 **n8n** 定时(cron schedule)触发 Agent 跑一轮抓取(详见下方 Processing Flow)
 
 **Processing**:
 
-Agent 根据抓取频率通过 scheduler 定时触发抓取任务。
-- 高频新闻源每 10 分钟轮询一次
-- 中频新闻源每天轮询一次
+**Agent 本身不带 cron,由 n8n cron 节点定时触发**(per Component Responsibilities 矩阵):
+- 高频新闻源每 10 分钟轮询一次(n8n cron `*/10 * * * *`)
+- 中频新闻源每天轮询一次(n8n cron `0 8 * * *`)
+- 触发方式:n8n cron 节点 → HTTP POST 到 Agent 的 trigger endpoint,Agent 跑一轮即退出
 
 抓取过程中对每个新闻源应用基本的 rate limiting,以避免目标网站的访问限制。
 
@@ -140,13 +140,14 @@ Agent 抓取新闻源页面后,提取有效信息,包括:
 
 ```mermaid
 flowchart TD
-    S[⏰ Scheduler] -->|按 frequency 触发<br/>抓取任务| A[🤖 Hermes Agent]
+    S[⏰ n8n cron trigger<br/>每 10min / 每天] -->|HTTP POST<br/>trigger 抓取| A[🤖 Hermes Agent]
     A -->|抓取 configured sources| N[(📰 News Websites)]
     N -->|HTML / 原始数据| A
-    A -->|按 keyword + 语义匹配筛选| A2[🤖 Hermes Agent<br/>已筛选原文]
+    A -->|category 关键词 + AI 语义匹配| A2[🤖 Hermes Agent<br/>已筛选 + 已分类]
     A2 -->|原文 + rewrite prompt| C[🧠 Claude API]
     C -->|改写后 title / content / summary| A3[🤖 Hermes Agent<br/>已改写]
-    A3 -->|Webhook POST<br/>X-Agent-Key 认证| B[⚙️ Backend API<br/>/webhook/incoming-news]
+    A3 -->|POST /items/articles<br/>Directus API Token 认证| D[⚙️ Directus]
+    D -->|lifecycle hook:<br/>category name → id<br/>final_* = ai_*| DB[(💾 PostgreSQL)]
 ```
 
 **Output**:
@@ -160,15 +161,17 @@ Agent 输出结构化新闻数据,包括:
 - AI 改写后的标题(`ai_title`)
 - AI 改写后的正文(`ai_content`)
 - AI 生成的摘要(`ai_summary`)
-- **AI 判定的话题分类(`category` name)** —— 如 "Medical",Backend 解析为 `category_id` 后入库
+- **AI 判定的话题分类(`category` name)** —— 如 "Medical",Directus lifecycle hook 解析为 `category_id` 后入库
+
+**目标接口**:`POST /items/articles`(Directus auto-gen),用 Directus API Token 鉴权(`Authorization: Bearer <token>`)。
 
 **Edge cases(category 分配)**:
 
 | 场景 | 处理 |
 |---|---|
 | 一篇匹配多个 category(置信度都不低) | Agent 选**置信度最高**的那个,只送一个 `category` |
-| 所有 category 都不匹配(最高置信度 < 阈值,如 < 0.5) | Agent **跳过**这篇,不发 webhook,日志记录"unclassifiable" |
-| Backend 收到不存在的 `category` name(如 admin 改了 category 名但 Agent 配置没同步) | Backend 返回 `400 Bad Request`,Agent 记录后跳过,**同时 Telegram 告警** |
+| 所有 category 都不匹配(最高置信度 < 阈值,如 < 0.5) | Agent **跳过**这篇,**不 POST 到 Directus**,日志记录 "unclassifiable" |
+| Directus 收到不存在的 `category` name(如 admin 改了 category 名但 Agent 配置没同步) | Directus 返回 `400 Bad Request`,Agent 记录后跳过,**触发 n8n send-notification → Telegram 告警** |
 | Agent 抓到符合多 category 的文章但都不强 | 同"所有 category 都不匹配",跳过更安全(避免错分类污染编辑列表) |
 
 > 🚧 **TODO**: 置信度阈值定多少?初步建议 0.5,跑起来后调整。
