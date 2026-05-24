@@ -6,7 +6,7 @@
 > - `HL-Intern-Project.md` 偏 **spec**(已敲定的技术选型、schema、API、里程碑)
 > - 本文档偏 **design**(模块责任拆解、设计思路、未决问题)
 >
-> 当前状态:**MVP 架构定稿,采用 Directus-first**(Authentik + Hermes Agent + Directus + n8n + PostgreSQL,NestJS 为 Phase 2 候选)。所有主要章节均已填充,部分小决策(`ai_summary` 用途、`final_*` vs Directus Revisions 等)待 mentor 确认或 spike 时定稿,见 Database Module 的 Open Schema Decisions。
+> 当前状态:**MVP 架构定稿,采用 Directus-first**(Authentik + Hermes Agent + Directus + n8n + PostgreSQL,NestJS 为 Phase 2 候选)。所有主要章节均已填充,少量决策(`ai_summary` 字段是否要补 tweet_text 用途、Directus 并发冲突检测机制等)待 mentor 确认或 spike 时定稿,见 Database Module 的 Open Schema Decisions。
 >
 > 文档中的标注:
 > - `> 🚧 TODO`: 待填写或待细化
@@ -341,7 +341,7 @@ flowchart TD
     Studio --> Edit
     Edit --> Modify["改 final_* 字段<br/>(初始内容 = ai_*,<br/>由 Directus beforeCreate hook<br/>入库时一次性写入)"]
     Modify --> SelectType[选 content_type<br/>ARTICLE / SHORT]
-    SelectType -.->|可选 Save| SaveOp["PATCH /items/articles/{id}<br/>final_* 写入<br/>status 保持 PENDING<br/>Directus Revisions 自动版本化"]
+    SelectType -.->|可选 Save| SaveOp["PATCH /items/articles/:id<br/>final_* 写入<br/>status 保持 PENDING<br/>Directus Revisions 自动版本化"]
     SaveOp -.-> Modify
     SelectType --> Publish[点 Publish<br/>status → PUBLISHING]
     Publish --> Hook["Directus beforeUpdate hook:<br/>校验 content_type 非 NULL<br/>校验 status 转移合法"]
@@ -765,7 +765,7 @@ PENDING → REJECTED → PENDING                (可选,重新提交)
 | 2 | per-platform 状态字段 | ✅ **已决**:加 6 个 nullable 字段(`wp_status` / `wp_error` / `wp_published_at` / `tweet_status` / `tweet_error` / `tweet_published_at`) |
 | 3 | 并发编辑保护 | 🟡 **方向已定**:MVP 不加 claim 字段,依赖 Directus Revisions 留痕。Data Studio 是否提供自动 409 冲突检测 **spike 时确认**;若不足 Phase 2 加 |
 | 4 | `category_id` 入库时谁决定 | ✅ **已决**:Agent 通过 AI 关键词 + 语义匹配判断 |
-| 5 | `final_*` vs Directus Revisions:是否真的需要 `final_*` 字段 | 🟡 **待 spike 确认**。当前方案:加 `final_*`(对外接口清晰)。另一种方案:只用 `ai_*` + Directus Revisions(第一版 revision 是 AI,后续 revision 是编辑改动),省 3 个字段。Spike Directus 时验证哪种顺手 |
+| 5 | `final_*` 字段策略验证 | 🟡 **MVP 暂定保留 `final_*`**(对外接口清晰,schema / publish / UI 全部已基于 final_* 设计)。spike Directus 时**只验证 Directus Revisions 使用体验**(是否够替代单独的 final_*);若 Revisions 体验非常好且足够,Phase 2 再评估是否简化 |
 | 6 | `ai_summary` / `final_summary` 字段保留方案 | 🟡 **当前实现已统一**:ARTICLE 发推用 `title + WP URL`(不读 summary);**SHORT 发推用 `final_summary`**。待 mentor 答复"当初加 summary 字段是否还想做别的用途(比如独立的 tweet_text 文案)",若需求有变再调整。 |
 | 7 | `final_summary` 长度约束 | 🟢 低:VARCHAR(280) 对中文边界,实际 ≤ 250 中文字符。可改 VARCHAR(250) |
 | 8 | 软删字段:是否加 `deleted_at` | 🟢 低,MVP 阶段可后议 |
@@ -1074,7 +1074,7 @@ sequenceDiagram
     Agent->>Agent: 关键词 + 语义筛选 category
     Agent->>Claude: rewrite prompt + 原文
     Claude-->>Agent: ai_title / ai_content / ai_summary
-    Agent->>Directus: POST /items/articles<br/>(API Token + source_*, ai_*, category name)
+    Agent->>Directus: POST /items/articles<br/>(API Token + source_*, ai_*, category_id)
     Directus->>Directus: beforeCreate hook:<br/>set final_* = ai_*<br/>(category_id Agent 已传)
     Directus->>DB: INSERT article
     DB-->>Directus: created (id, status=PENDING)
@@ -1100,7 +1100,7 @@ sequenceDiagram
     Note over Directus: item-level permission:<br/>只返回 category ∈ user.assigned_categories
     Directus-->>Studio: PENDING 列表(仅本编辑的 category)
     Editor->>Studio: 打开一篇,改 final_* 字段<br/>选 content_type
-    Studio->>Directus: PATCH /items/articles/{id}
+    Studio->>Directus: PATCH /items/articles/:id
     Note over Directus: Revisions 自动记录历史
     Directus->>DB: UPDATE
     Editor->>Studio: 点 Publish (status → PUBLISHING)
@@ -1141,7 +1141,7 @@ sequenceDiagram
     Note over Studio: 文章状态 FAILED<br/>wp_status=PUBLISHED ✅<br/>tweet_status=FAILED ❌
     Admin->>Studio: 点 Retry 按钮(自定义 action)
     Studio->>N8N: POST /webhook/retry<br/>(article_id, Idempotency-Key)
-    N8N->>Directus: GET /items/articles/{id}
+    N8N->>Directus: GET /items/articles/:id
     Directus-->>N8N: wp_status=PUBLISHED, tweet_status=FAILED
     
     N8N->>N8N: 判断: WP 已成功,跳过
@@ -1295,7 +1295,7 @@ Hetzner VPS (Dokploy 管理)
 ├── PostgreSQL(Docker container)
 │   └── 同一个 Postgres 实例,Directus 管业务 schema;n8n 有自己的内部表
 ├── Directus(Docker container)
-│   ├── 官方 image: directus/directus:latest(v5)
+│   ├── 官方 image: directus/directus:<固定稳定 tag>(spike 时选,**避免 :latest 防止意外升级**)
 │   ├── Env vars: DB connection / OIDC config / API token / KEY 等
 │   └── 媒体存储:Phase 2 考虑 S3 / R2;MVP 用 volume(/uploads)
 ├── n8n(Docker container)
@@ -1305,7 +1305,7 @@ Hetzner VPS (Dokploy 管理)
 └── Hermes Agent(Docker container)
     ├── 自定义 Node.js 服务
     ├── Env vars: Claude API key / Directus API token / 抓取源配置
-    └── cron 调度内置(或用 n8n 触发)
+    └── **由 n8n cron 触发**(Agent 自身无定时器,跟前文 Agent Module Processing 一致)
 ```
 
 #### dev / prod 环境
@@ -1355,37 +1355,43 @@ Hetzner VPS (Dokploy 管理)
 
 ## Implementation Roadmap
 
-按依赖顺序推进:
+按 Directus-first 架构的依赖顺序推进(MVP):
 
-1. **ER 图 + 数据库的表** — 确定 schema
-2. **设计 API** — 操纵数据的接口
-3. **User 表** — 用户与权限交互
-4. **设计 frontend** — 编辑工作台
-5. **写测试** — 单元测试 + 集成测试
+1. **Directus 部署起来**(Dokploy + Docker + PostgreSQL)
+2. **Directus Content Types 定义**(`articles` + `categories`,字段按 Database Module schema)
+3. **Permissions 配置**(editor role + item-level permission + field permission;`source_*` / `ai_*` 锁 read-only)
+4. **Lifecycle Hooks 实现**(`beforeCreate`: `final_* = ai_*` + status guard;`beforeUpdate`: 状态转移 + content_type 校验)
+5. **Authentik OIDC 集成**(Directus 配 OIDC client,editor 登录测试)
+6. **Insights 看板配置**(My Pending / My Recent Activity 等)
+7. **n8n 部署 + 配 Directus credentials**(API token)
+8. **n8n workflows 配置**(publish-article / retry-publish / send-notification)
+9. **Directus Flows 配置**(`status=PUBLISHING` 触发 → 调 n8n webhook)
+10. **Agent 实现**(独立 Node 服务,启动时 cache categories,n8n cron 定时触发,POST 到 Directus)
+11. **End-to-end publish 测试**(模拟一篇文章走完 Ingest → Edit → Publish → WP/Twitter → Telegram 通知)
 
-**阶段性目标**:
+**阶段性目标 / 验证点**:
 
 ```
-表确定了
+Step 1-2: Directus 跑起来,admin UI 能登录,能手动建一篇 article
   ↓
-API 确定了 + migration
+Step 3-4: editor role 登录只看到自己 category 的文章,改 final_* 工作
   ↓
-写一些 code + 部署到 repo
+Step 5: Authentik OIDC 接通,editor 用 Authentik 账号登录 Directus
   ↓
-CI/CD
+Step 7-9: n8n 收到 Directus Flow webhook,能发到 WP / Twitter 测试号
   ↓
-服务器上了(研究 Dokploy dev/prod)
+Step 10: Agent 跑起来,从 1 个目标新闻源抓 1 篇,自动入 Directus
   ↓
-Goal: API 可以调用了(测试可以跑通)
-  ↓
-Agent: 可以自己调用 API,n tasks frequency,prompt,调用 API → 数据库里有数据了
-  ↓
-Frontend: user interaction, CRUD, publish
-  ↓
-Goal: WordPress + Twitter 发布
+Step 11: editor 在 Data Studio 审 + publish,WP 和 Twitter 出现文章
   ↓
 DONE!
 ```
+
+**测试 / CI/CD**(贯穿全程):
+- Directus 配置(content types / permissions / hooks / flows)导出 JSON 入 git
+- n8n workflows 导出 JSON 入 git
+- Agent 自己有 unit test(分类逻辑、Claude 调用、Directus POST)
+- CI:Agent 跑 lint + test;Directus / n8n 配置 schema diff check
 
 ---
 
