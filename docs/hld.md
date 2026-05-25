@@ -75,7 +75,7 @@ MVP 采用 **Directus-first 架构**,5 个核心组件:
 | cron schedule | **n8n** | |
 | AI workflow orchestration | **n8n** | |
 | Retry workflow / failure alert | **n8n** | |
-| Claude API 调用 | **Agent**(简单)/ **n8n**(复杂) | |
+| Claude API 调用 | **Agent**(MVP 唯一调用方) | Agent 在抓取流程内直接调 Claude 做改写 + 分类。n8n MVP 阶段**不调 Claude**,只管 cron / publish / notification / retry。**职责边界清晰** |
 | 抓新闻 / rewrite / classification | **Hermes Agent + Claude** | |
 | PostgreSQL | shared DB | **MVP 只允许 Directus 直接管 schema / CRUD;其他组件全部通过 Directus API 访问** |
 | NestJS | **Phase 2 complexity layer** | MVP 不引入 |
@@ -93,7 +93,7 @@ MVP 采用 **Directus-first 架构**,5 个核心组件:
 #### Agent Module
 
 **Responsibility**:
-Agent 模块负责从外部的新闻源抓取新闻并且调用 AI 改写,将处理后的新闻数据通过 Webhook 推送到后端。
+Agent 模块负责从外部的新闻源抓取新闻并且调用 AI 改写,将处理后的新闻数据**通过 Directus REST API POST 入库**(`POST /items/articles`,Directus auto-gen 的标准 endpoint,**不是我们自己写的 webhook**)。
 
 **Category 分配机制**:Agent 用 AI 关键词匹配 + 语义匹配判断每篇文章属于哪个 `category`(`categories` 表中的话题分类,如 Medical / Politics / Finance / AI)。每个 category 在 admin 配置时关联一组 keyword,Agent 抓到原文后:
 
@@ -363,7 +363,11 @@ flowchart TD
 
 ##### Editor 在 Data Studio 里的视图
 
-> Directus Data Studio **自动渲染 admin UI**,**不做独立 React / Vue 前端**。但 **Publish / Reject / Retry 等自定义按钮 ≠ 零代码** —— 需要少量 **Directus extension**(custom interface / custom operation / custom panel)或 **Directus Flow 的 custom operation**。"配置"与"少量代码"是混合的,不是纯点鼠标。下文 page-by-page 规格描述的是 Data Studio 里的配置 + 少量 custom action。
+> Directus Data Studio **自动渲染 admin UI**,**不做独立 React / Vue 前端**。但 **Publish / Reject / Retry 等自定义按钮 ≠ 零代码** —— 需要少量 **Directus extension**(custom interface / custom operation / custom panel)或 **Directus Flow 的 custom operation**。"配置"与"少量代码"是混合的,不是纯点鼠标。
+>
+> ⚠️ **MVP 退化路径**:如果 extension 工作量超预期,**MVP 可以先不写自定义按钮**,editor / admin **直接在 Data Studio 的字段编辑面板里手动改 `status`**(改成 `PUBLISHING` 触发 Flow,改成 `REJECTED` 填 `rejection_reason`)。按钮是 **UX enhancement**(更顺手),不是功能必需。Phase 2 真要上 polished 流程时再加 button。
+>
+> 下文 page-by-page 规格描述的是 Data Studio 里的配置 + 少量 custom action(理想态)。
 
 **Sidebar Navigation**(editor role 可见):
 - 📰 **Articles**(主工作区)
