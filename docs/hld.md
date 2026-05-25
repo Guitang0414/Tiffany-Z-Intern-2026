@@ -592,7 +592,7 @@ erDiagram
 
 **Directus Revisions** 自动跟踪 `final_*` 字段的每次修改。要回到 AI 原版:Data Studio Revisions tab 找第一条 revision 即可(就是 `ai_*` 复制过来的版本)。
 
-> 🚧 **TODO**: `category_id` 在 Agent ingestion 时由谁决定?详见 Agent Module 的 Edge cases 小节(✅ 已决:Agent AI 分类)。
+> ✅ **已决**:`category_id` 在 Agent ingestion 时由 **Agent 端 AI 分类 + 本地 cache 查 id** 决定。详见 Agent Module 的 Edge cases 小节。
 
 ---
 
@@ -1416,9 +1416,3 @@ DONE!
 - n8n workflows 导出 JSON 入 git
 - Agent 自己有 unit test(分类逻辑、Claude 调用、Directus POST)
 - CI:Agent 跑 lint + test;Directus / n8n 配置 schema diff check
-
----
-
-## Version Bump
-
-> 🚧 **TODO**: 此节标题原文是 "Version pump"(疑似 "Version bump"),内容待补 —— 是讲版本管理策略?还是发布 / semver?
