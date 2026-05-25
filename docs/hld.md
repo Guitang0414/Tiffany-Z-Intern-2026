@@ -1187,9 +1187,20 @@ sequenceDiagram
 
 ---
 
-### Interface Design
+### Interface Design(API Inventory)
 
-MVP 用 Directus auto-generated APIs,**绝大多数 endpoint 不用自己写**(Directus 根据 Content Type 自动生成)。少量定制(Directus custom controller / hook / Flow)用 TypeScript / JS 实现。本节列清单 + 描述每个接口的来源 / 用途 / 鉴权。
+> ⚠️ **本节不是"从零设计 API"**,而是 **列出系统里有哪些 API 可用、谁调谁、怎么 auth** 的 reference / inventory。
+>
+> **MVP 阶段绝大多数 endpoint 是 Directus 自动生成的**(根据 Content Type 配置):
+> - `/items/articles`、`/items/categories`、`/users`、`/auth/...` 等 —— **我们不写代码,装好 Directus + 配 Content Type 就有**
+> - Agent / n8n / 未来 NestJS 都**调这些 auto-gen endpoint** 与数据层交互
+>
+> **少量需要我们配置 / 写代码的**:
+> - Directus Flow webhook(在 Directus admin 配置,不写代码)
+> - n8n workflow trigger / 节点(在 n8n 配置,不写代码)
+> - Agent 端的 HTTP client(Agent 是我们写的 Node 服务,代码里 hardcode endpoint URL / token / payload)
+>
+> 所以下面的清单**主要是给开发者查的**(写 Agent / 配 n8n 时知道有哪些 endpoint 可用),**不是从零设计的 API spec**。
 
 #### Directus Auto-Generated APIs
 
