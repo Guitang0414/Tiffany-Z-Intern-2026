@@ -299,7 +299,9 @@ networks:
 
 ### 4.3 n8n(项目专用实例)
 
-> 🟡 **默认方案:新部署一份 `n8n-news`,跟现有 `n8n-with-postgres` 隔离**。⏳ 实际复用还是新建待 Q9 mentor 答复。
+> 🟡 **默认方案:新部署一份 `n8n-news`,跟现有 `n8n-with-postgres` 隔离**。⏳ 实际复用还是新建待 Q2 mentor 答复。
+>
+> **新证据(2026-06-09)**:原版 `HL-Intern-Project.md` 里**没有 n8n**(原设计用 FastAPI 后端做编排),所以现有 `n8n-with-postgres` 大概率不是为本项目预备的,这强化了"新建"的论据。
 
 #### 4.3.1 角色(per HLD)
 
@@ -473,19 +475,28 @@ mentor 如有别的 org / 命名约定,实施时改。
 
 ### 7.2 dev/prod WP 测试问题
 
-⏳ **Q2 续待 mentor 确认**。默认按 (c):
+⏳ **Q3 续待 mentor 确认**。
 
-🟡 **默认方案 (c):本地 / dev 环境起一个独立 WP container 自测**,prod 切到 wp-seaeet。
+**新证据(2026-06-09 读 doc 发现)**:`HL-Intern-Project.md` 的 "风险与依赖" 表里写
+"WordPress 插件/主题兼容性 → **提前在测试站验证**"。"测试站"三个字暗示公司**可能已有 WP 测试站**,只是没在 Dokploy 列表里。
 
-dev 环境 compose 加一个:
+🟡 **默认方案(更新):优先用公司已有的测试 WP**(待 mentor 告知在哪);若确认没有,fallback 到本地起独立 WP container 自测,prod 切到 wp-seaeet。
+
+| mentor 答 | 本节怎么改 |
+|---|---|
+| (a) 公司测试 WP 在 Dokploy 之外 | 本节指向那个 URL,Hermes Agent + n8n 的 dev env 配那个 endpoint |
+| (b) 是 wp-seaeet 的某个子域名(如 dev.xxx)| 同上 |
+| (c) 让我本地起 docker | 用下面 compose 草稿,本地 + dev 共用 |
+| (d) 没有,需要新建 | dev 环境的 compose 加一个 wp-dev service |
+
+**fallback compose 草稿**(若 mentor 回 (c) 或 (d)):
+
 ```yaml
 services:
   wp-dev:
     image: wordpress:6.9-php8.3-apache  # 跟生产同版本
     # ... (类似 wp-seaeet 的配置, 但独立 DB 独立 domain)
 ```
-
-mentor 若选 (a) staging 已存在,或 (b) 直接对 prod 测 draft,本节相应改。
 
 ### 7.3 环境变量分离
 
@@ -546,15 +557,23 @@ Phase 3: 切量上线  (Week 8)
   - 监控 + 告警接通 Telegram
 ```
 
-### 9.2 News-scraper 处置
+### 9.2 News-scraper / news-gateway 处置
 
-⏳ **Q3 待 mentor 答复**。三种可能:
+⏳ **Q1 待 mentor 答复**。
+
+**新证据(2026-06-09 读 doc 发现)**:`HL-Intern-Vision.md` 和 `HL-Intern-Project.md` 两份文档**都没出现** News-scraper / news-gateway。Vision 里明确说"用 Hermes Agent 替代传统爬虫,理由是传统爬虫维护成本高、反爬难、不能理解内容"。News-scraper 看配置就是传统爬虫风格(直发 WP,无 AI),news-gateway 域名 Cert 当前显示 none(可能未上线)。
+
+→ **强证据**:这两个 service 大概率是 mentor 早期原型,**不在本项目蓝图内**。
+
+🟡 **默认方案(更新):本项目按 HLD 独立做,Phase 3 上线时建议同步下线 News-scraper**;news-gateway 状态另问。
 
 | mentor 答 | 处置 |
 |---|---|
-| 替代 News-scraper | Phase 3 时同步关闭 News-scraper service,新 pipeline 上线 |
-| 平行运行 | 不动 News-scraper,我项目独立跑 |
-| 我项目复用 | plan 需要重写,Hermes Agent 改为接 News-scraper 输出而不是自己抓 |
+| 我项目替代 News-scraper(默认推测) | Phase 3 上线后, mentor 关闭 News-scraper service |
+| 平行运行 | 不动 News-scraper, 我项目独立跑(可能形成"两条新闻流"局面)|
+| 我项目复用 News-scraper 输出 | **本 plan 大改**: Hermes Agent 章节改为"接 News-scraper 抓取产出, 只负责 AI 改写 + 入 Directus" |
+| news-gateway 还在使用 | 我项目跟它的分工 mentor 说明 |
+| news-gateway 已废弃 | 跟我项目无关 |
 
 ---
 
@@ -589,10 +608,11 @@ Phase 3: 切量上线  (Week 8)
 
 | # | 问题 | 影响 plan 什么 | 状态 |
 |---|---|---|---|
-| Q3 | News-scraper / news-gateway 跟项目什么关系 | 9.2 News-scraper 处置;Hermes Agent 章节是否要重写 | ⏳ 已发,等回 |
-| Q9 | n8n 复用还是新建 + 接入方式 | 4.3 n8n 部署方案;Authentik 集成范围 | ⏳ 已发,等回 |
-| Q2 续 | dev / staging WP 怎么办 | 7.2 dev WP 方案 | ⏳ 已发,等回 |
+| Q1 | News-scraper / news-gateway 跟项目什么关系 | 9.2 处置方案;Hermes Agent 章节是否要重写 | ⏳ 已发 + 2026-06-09 用 doc 证据精化,等回 |
+| Q2 | n8n 复用还是新建 + 接入方式 | 4.3 n8n 部署方案;Authentik 集成范围 | ⏳ 已发 + 新证据强化"新建",等回 |
+| Q3 续 | dev / staging WP 怎么办 | 7.2 dev WP 方案 | ⏳ 已发 + doc 里有"测试站"线索,等 mentor 说清楚 |
 | — | Authentik 后台访问权限 | 5 Authentik 集成细节(redirect URI / scope / property mapping 等)| ⏳ 已请求,等开通 |
+| — | Twitter 账号(Vision 写"待建立")| Twitter 分发部分可能推迟到 Phase 2 | 🟡 待 mentor 确认是否 MVP 先只做 WP |
 
 ---
 
