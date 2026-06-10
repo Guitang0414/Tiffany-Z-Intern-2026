@@ -12,7 +12,7 @@
 > - 🟡 **默认假设**: 等 mentor 回复前我采用的默认方案,回复后可能微调
 > - ⏳ **待 mentor 确认**: 没有答案我不能动笔的卡点
 >
-> 当前状态:**初稿**,基于 2026-06 Dokploy 调研写成。3 个核心问题已发 mentor,见文末 Section 11。
+> 当前状态:**mentor 回复后第一轮调整**(2026-06-10)。3 个核心问题已 close 2 个(Q1/Q2),Q3 续部分 close。剩余开放项见 Section 11 / 12。
 
 ---
 
@@ -93,9 +93,16 @@
 |---|---|---|---|---|---|
 | 1 | `cms` (Directus) | `directus/directus:11.5.x` (pin)| `cms.epochtimesnw.com` | ✅ 编辑访问 | 内置 PG |
 | 2 | `hermes-agent` | 自构建(Node 18 / 20) | — | ❌ 内部 worker | 无 PG |
-| 3 | `n8n-news` (项目专用 n8n)| `n8nio/n8n:1.79.x` (pin)| `n8n-news.epochtimesnw.com` 或 内网 | ⏳ 看 forward-auth 方案 | 🟡 默认新建,⏳ 待 Q9 |
 
-> 🟡 **默认假设:Directus 用最新 stable major (11.x);n8n 选一个 LTS-like 稳定 tag**。实际版本在动手时再 pin,但**不会用 `:latest`**(违反 HLD 推荐)。
+**不新增的服务**(沿用现有):
+
+| Service | 用现成的 | 说明 |
+|---|---|---|
+| n8n | `n8n-with-postgres` (`n8n.epochtimesnw.com`)| 🟢 mentor 确认复用,workflow 用命名 / tag 隔离(见 4.3) |
+| WordPress | `wp-seaeet` (`www.epochtimesnw.com`)| 🟢 mentor 确认是生产目标 |
+| Authentik | 现有 | 🟢 给 Directus 配 OIDC Provider 即可 |
+
+> 🟡 **默认假设:Directus 用最新 stable major (11.x)**。实际版本在动手时再 pin,**不会用 `:latest`**(违反 HLD 推荐)。
 
 ---
 
@@ -297,56 +304,63 @@ networks:
 
 ---
 
-### 4.3 n8n(项目专用实例)
+### 4.3 n8n(复用现有 `n8n-with-postgres`)
 
-> 🟡 **默认方案:新部署一份 `n8n-news`,跟现有 `n8n-with-postgres` 隔离**。⏳ 实际复用还是新建待 Q2 mentor 答复。
->
-> **新证据(2026-06-09)**:原版 `HL-Intern-Project.md` 里**没有 n8n**(原设计用 FastAPI 后端做编排),所以现有 `n8n-with-postgres` 大概率不是为本项目预备的,这强化了"新建"的论据。
+🟢 **mentor 已确认(2026-06-10):复用现有 `n8n-with-postgres`(`n8n.epochtimesnw.com`),不另起实例**。本项目所有 workflow 加进现有 n8n,用命名 / tag 规范隔离。
 
-#### 4.3.1 角色(per HLD)
+#### 4.3.1 职责(per HLD)
 
-- publish-article workflow(收 Directus Flow webhook → 发 WP / Twitter)
-- retry-publish workflow
-- send-notification workflow(发 Telegram)
+- `publish-article` workflow(收 Directus Flow webhook → 发 WP / Twitter)
+- `retry-publish` workflow
+- `send-notification` workflow(发 Telegram)
 - cron 触发 Hermes Agent
 
-#### 4.3.2 Image / 版本
+#### 4.3.2 Workflow 组织规范(避免跟现有项目冲突)
 
-- `n8nio/n8n:1.79.x`(pin,**不用 `:latest`**)
-- 🟡 实际版本动手时定
-
-#### 4.3.3 Compose 草稿
-
-参照现有 `n8n-with-postgres` 模板(已观察 compose),改:
-- service 名 `n8n-news`(避免跟现有冲突)
-- `N8N_HOST: n8n-news.epochtimesnw.com`
-- 独立的 `POSTGRES_*` env vars
-- 独立的 volume 命名
-
-#### 4.3.4 Domain / 接入方式(关键决策)
-
-⏳ **待 Q9 mentor 答复**:
-
-| 方案 | 域名 | 访问控制 |
+| 维度 | 规范 | 例 |
 |---|---|---|
-| A 暴露 + Outpost forward-auth | `n8n-news.epochtimesnw.com` | Authentik Proxy Outpost 挡在前面要求 SSO 登录 |
-| B 暴露 + n8n 自带账号 | `n8n-news.epochtimesnw.com` | n8n built-in email/password(跟现有 n8n-with-postgres 一致) |
-| C 不暴露 | 无对外 domain | 只在 `dokploy-network` 内访问,需要 SSH tunnel 调试 |
+| **Workflow 命名** | 全部以 `news/` 前缀 | `news/publish-article` / `news/send-notification` |
+| **Tag** | 所有 workflow 加 tag `news-curation` | n8n UI 可一键 filter 看本项目所有 workflow |
+| **Credentials** | 本项目用独立 credentials,命名带 `news/` 前缀 | `news/directus-api-token` / `news/wp-app-password` / `news/telegram-bot` / `news/claude-api` |
+| **Webhook paths** | 本项目 webhook 路径以 `/news/` 开头 | `https://n8n.epochtimesnw.com/webhook/news/publish` |
+| **Static data** | 不污染全局 static data,workflow-scoped | — |
 
-🟡 **默认方案 A**(符合"SSO 优先"原则),但 Outpost 配置工作量大,可能 mentor 选 B 或 C。
+#### 4.3.3 Auth 处理(n8n 自身,不是 SSO)
+
+🟢 mentor 默认不接 Authentik(没选 Outpost forward-auth):
+- n8n 维持现有 **email / password auth**(跟现状一致)
+- 编辑**不直接访问 n8n**(他们用 Directus Data Studio)
+- workflow 自动跑,无人值守
+- 调试时 admin 用现有 n8n 账号登录(管理员账号 mentor 提供)
+- 📌 **接受"n8n 是 SSO 体系外的例外"** —— 跟 WordPress 一致
+
+#### 4.3.4 共享实例的风险与缓解
+
+| 风险 | 缓解 |
+|---|---|
+| 我项目 workflow 误改 / 删除其他项目 workflow | 命名前缀 + tag 让范围明确;admin 操作前先 filter by tag |
+| credentials 列表混乱 | credentials 也加 `news/` 前缀,跟其他项目 visually 区分 |
+| n8n 资源用尽(执行队列 / DB)| n8n 共享实例的固有限制,Phase 2 视情况评估单独部署 |
+| 版本升级影响本项目 | 升级时跟 mentor 协调,跑回归测试 |
+
+#### 4.3.5 Compose / 部署
+
+🟢 **本项目不新部署 n8n service**。只:
+- 在现有 n8n UI 里 import 我项目的 workflow JSON(从 git repo 导入)
+- 在现有 n8n credentials store 里加我项目的 credentials
 
 ---
 
 ## 5. Authentik SSO 集成
 
-⏳ **本节细节等 Authentik 后台权限开通后补全**。下面是基于现有信息能确定的部分:
+🟢 **mentor 已确认(2026-06-10):Tiffany 用 Tailscale 已可访问 Authentik 后台**,看现有 OIDC Provider 配置作为模板。本节具体字段值待截图调研后补全(Tiffany 待办)。
 
 ### 5.1 集成范围
 
 | Service | 集成方式 | 说明 |
 |---|---|---|
-| Directus | OIDC(原生支持)| 🟢 主要集成 |
-| n8n-news | Outpost forward-auth(可选)| 🟡 默认 A 方案 |
+| Directus | OIDC(原生支持)| 🟢 **主要集成** —— 编辑通过 Authentik SSO 登录 Data Studio |
+| n8n (现有实例)| 不集成 | 🟢 mentor 维持现状,n8n 自带 email/password auth |
 | Hermes Agent | 不集成 | service-to-service 用 Directus API token |
 | WordPress | 不集成 | 跟现有 wp-seaeet 一致,n8n 用 `WP_APP_PASSWORD` 调 REST |
 
@@ -421,7 +435,7 @@ Dokploy 拉代码 → docker compose up -d --build → 替换 container
 |---|---|---|---|
 | `cms` (Directus) | git repo 含 `docker-compose.yml`(只有 compose,不 build 代码)| push 到 main | content type / hooks / flows 改了要重新 sync |
 | `hermes-agent` | git repo 含 Dockerfile + 源码 | push 到 main | Dokploy 自动 build image |
-| `n8n-news` | git repo 含 `docker-compose.yml`(只 compose)| push 到 main | workflow JSON 也提交进 git |
+| n8n workflows | git repo 含 `workflows/*.json`(workflow 导出)| 部署时 import 到现有 n8n | 不部署 n8n service,只 import workflow JSON |
 
 ### 6.3 Directus 配置同步
 
@@ -473,29 +487,26 @@ mentor 如有别的 org / 命名约定,实施时改。
 
 ⚠️ **禁止 dev 和 prod 共享数据库**。
 
-### 7.2 dev/prod WP 测试问题
+### 7.2 dev/prod WP 测试策略
 
-⏳ **Q3 续待 mentor 确认**。
+🟢 **mentor 确认(2026-06-10):"wp 就部署在 wp-seaeet 这个 service 里(在 dokploy 里有)域名是 www.epochtimesnw.com"** → 生产目标 = wp-seaeet。
 
-**新证据(2026-06-09 读 doc 发现)**:`HL-Intern-Project.md` 的 "风险与依赖" 表里写
-"WordPress 插件/主题兼容性 → **提前在测试站验证**"。"测试站"三个字暗示公司**可能已有 WP 测试站**,只是没在 Dokploy 列表里。
+🟡 **mentor 没明确说 dev / 测试用什么 WP**。`HL-Intern-Project.md` 风险表提到"提前在测试站验证",暗示可能有测试 WP,但 Dokploy 里没看到。**先按下面默认推进,后续如发现需要 staging 再问 mentor**:
 
-🟡 **默认方案(更新):优先用公司已有的测试 WP**(待 mentor 告知在哪);若确认没有,fallback 到本地起独立 WP container 自测,prod 切到 wp-seaeet。
-
-| mentor 答 | 本节怎么改 |
+| 阶段 | WP 目标 |
 |---|---|
-| (a) 公司测试 WP 在 Dokploy 之外 | 本节指向那个 URL,Hermes Agent + n8n 的 dev env 配那个 endpoint |
-| (b) 是 wp-seaeet 的某个子域名(如 dev.xxx)| 同上 |
-| (c) 让我本地起 docker | 用下面 compose 草稿,本地 + dev 共用 |
-| (d) 没有,需要新建 | dev 环境的 compose 加一个 wp-dev service |
+| 本地开发 | 本地起独立 WP container 自测 |
+| dev 联调(部署在 Dokploy 上) | 同上 —— dev 环境带一个 `wp-dev` 服务 |
+| Phase 2 真发布测试 | 切到 wp-seaeet,**测试文章以 draft 状态**留 WP 后台,人工清理 |
+| Phase 3 prod | wp-seaeet 直接发布 |
 
-**fallback compose 草稿**(若 mentor 回 (c) 或 (d)):
+**dev / 本地 WP compose 草稿**:
 
 ```yaml
 services:
   wp-dev:
     image: wordpress:6.9-php8.3-apache  # 跟生产同版本
-    # ... (类似 wp-seaeet 的配置, 但独立 DB 独立 domain)
+    # ... (类似 wp-seaeet 的配置, 但独立 DB + 独立 domain)
 ```
 
 ### 7.3 环境变量分离
@@ -543,7 +554,7 @@ Phase 1: dev 部署 + 联调  (Week 7 上半)
   - Directus dev 起来
   - Authentik dev OIDC 接通
   - Hermes Agent dev 跑通 1 篇文章入库
-  - n8n-news dev 跑通 publish workflow (发 dev WP)
+  - 现有 n8n 跑通 `news/publish-article` workflow (发 dev WP)
 
 Phase 2: prod 部署 + 真发布测试  (Week 7 下半)
   - prod Directus + n8n + Agent 全起来
@@ -559,21 +570,9 @@ Phase 3: 切量上线  (Week 8)
 
 ### 9.2 News-scraper / news-gateway 处置
 
-⏳ **Q1 待 mentor 答复**。
+🟢 **mentor 已确认(2026-06-10):"这俩和我们目前的项目都没关系,你不用理的"**。
 
-**新证据(2026-06-09 读 doc 发现)**:`HL-Intern-Vision.md` 和 `HL-Intern-Project.md` 两份文档**都没出现** News-scraper / news-gateway。Vision 里明确说"用 Hermes Agent 替代传统爬虫,理由是传统爬虫维护成本高、反爬难、不能理解内容"。News-scraper 看配置就是传统爬虫风格(直发 WP,无 AI),news-gateway 域名 Cert 当前显示 none(可能未上线)。
-
-→ **强证据**:这两个 service 大概率是 mentor 早期原型,**不在本项目蓝图内**。
-
-🟡 **默认方案(更新):本项目按 HLD 独立做,Phase 3 上线时建议同步下线 News-scraper**;news-gateway 状态另问。
-
-| mentor 答 | 处置 |
-|---|---|
-| 我项目替代 News-scraper(默认推测) | Phase 3 上线后, mentor 关闭 News-scraper service |
-| 平行运行 | 不动 News-scraper, 我项目独立跑(可能形成"两条新闻流"局面)|
-| 我项目复用 News-scraper 输出 | **本 plan 大改**: Hermes Agent 章节改为"接 News-scraper 抓取产出, 只负责 AI 改写 + 入 Directus" |
-| news-gateway 还在使用 | 我项目跟它的分工 mentor 说明 |
-| news-gateway 已废弃 | 跟我项目无关 |
+→ 本项目按 HLD 独立部署,**不需要处理 News-scraper 和 news-gateway**(不下线、不复用、不承接)。先前关于"替代 / 平行 / 复用"的猜测全部撤销。
 
 ---
 
@@ -588,7 +587,7 @@ Phase 3: 切量上线  (Week 8)
 - [ ] Authentik 里 `news-editor` group 成员登录后,role 是 `editor`
 - [ ] Hermes Agent 容器内 curl Directus `/items/categories` 200 返回
 - [ ] Agent 跑一轮:抓 1 篇文章 → 调 Claude 改写 → POST 到 Directus → 在 Data Studio 看见
-- [ ] n8n-news 收到 Directus Flow webhook 时触发 workflow
+- [ ] 现有 n8n 收到 Directus Flow webhook(`/webhook/news/publish`)时触发 `news/publish-article` workflow
 - [ ] workflow 发 dev WP 成功,Directus 里 `wp_status=PUBLISHED`
 
 ### 10.2 Phase 2 验收
@@ -604,26 +603,28 @@ Phase 3: 切量上线  (Week 8)
 
 ---
 
-## 11. Open Questions / 待 mentor 确认
+## 11. Open Questions / mentor 确认追踪
 
 | # | 问题 | 影响 plan 什么 | 状态 |
 |---|---|---|---|
-| Q1 | News-scraper / news-gateway 跟项目什么关系 | 9.2 处置方案;Hermes Agent 章节是否要重写 | ⏳ 已发 + 2026-06-09 用 doc 证据精化,等回 |
-| Q2 | n8n 复用还是新建 + 接入方式 | 4.3 n8n 部署方案;Authentik 集成范围 | ⏳ 已发 + 新证据强化"新建",等回 |
-| Q3 续 | dev / staging WP 怎么办 | 7.2 dev WP 方案 | ⏳ 已发 + doc 里有"测试站"线索,等 mentor 说清楚 |
-| — | Authentik 后台访问权限 | 5 Authentik 集成细节(redirect URI / scope / property mapping 等)| ⏳ 已请求,等开通 |
+| Q1 | News-scraper / news-gateway 跟项目什么关系 | 9.2 处置方案 | ✅ mentor 答(2026-06-10):**无关,忽略** |
+| Q2 | n8n 复用还是新建 + 接入方式 | 4.3 n8n 部署方案 | ✅ mentor 答(2026-06-10):**复用现有 n8n,不接 SSO** |
+| Q3 续 | dev / staging WP 怎么办 | 7.2 dev WP 方案 | 🟡 mentor 部分答(确认 prod=wp-seaeet),dev 用本地 container 默认推进 |
+| — | Authentik 后台访问权限 | 5 Authentik 集成细节 | ✅ mentor 确认(2026-06-10):Tailscale 已可看,Tiffany 调研中 |
 | — | Twitter 账号(Vision 写"待建立")| Twitter 分发部分可能推迟到 Phase 2 | 🟡 待 mentor 确认是否 MVP 先只做 WP |
 
 ---
 
 ## 12. 待补全(后续迭代)
 
-以下章节在 mentor 回复 / Authentik 权限开通后补:
+mentor 答完核心 3 个问题后,剩下要做的:
 
-- [ ] Section 5 — Authentik OIDC Provider 配置具体截图 / 字段值参考(等权限)
-- [ ] Section 4.3 — n8n 最终方案(等 Q9)
-- [ ] Section 9.2 — News-scraper 处置具体步骤(等 Q3)
-- [ ] Section 7.2 — dev WP 方案(等 Q2 续)
+- [ ] **Section 5 — Authentik OIDC Provider 配置具体字段值**(Tiffany 看 Authentik 后台截图后,Claude 补全 redirect URI / scope / property mapping / signing key 等具体值)
+- [ ] **Section 4.3 — n8n workflow 实际命名 list**(动手时填入具体 workflow 名 / tag / credential 名)
+- [x] ~~Section 9.2 — News-scraper 处置~~(已 close:无关)
+- [x] ~~Section 4.3 — n8n 复用/新建~~(已 close:复用)
+- [ ] **Section 7.2 — 如果开发中发现需要 staging WP,再回头问 mentor**
+- [ ] **Twitter 集成范围确认**(MVP 是否包含,还是推迟到 Phase 2)
 - [ ] Monitoring / Logging 策略(Phase 2 考虑接 uptime-kuma)
 - [ ] Backup 策略(运维层面,本 plan 不展开,跟现有 service 一致)
 
@@ -635,13 +636,17 @@ Phase 3: 切量上线  (Week 8)
 
 | 类型 | 命名 |
 |---|---|
-| Dokploy service | `cms`(Directus)/ `hermes-agent` / `n8n-news` |
+| Dokploy service | `cms`(Directus)/ `hermes-agent`(n8n 沿用现有,不新增)|
 | Domain | `cms.epochtimesnw.com` / `cms-dev.epochtimesnw.com` |
 | Authentik OIDC Provider | `directus-cms` / `directus-cms-dev` |
 | Authentik Application | `Directus CMS` / `Directus CMS Dev` |
 | Authentik group | `news-editor` / `news-admin` |
 | Directus role | `editor` / `admin` |
-| Git repo(默认)| `Guitang0414/ai-news-cms` / `ai-news-agent` / `ai-news-n8n` |
+| n8n workflow | `news/publish-article` / `news/retry-publish` / `news/send-notification` |
+| n8n tag | `news-curation`(本项目所有 workflow 加这个 tag)|
+| n8n credentials | `news/directus-api-token` / `news/wp-app-password` / `news/telegram-bot` / `news/claude-api` |
+| n8n webhook paths | `/news/publish` / `/news/retry` / `/news/notify`(避免跟现有 workflow 冲突)|
+| Git repo(默认)| `Guitang0414/ai-news-cms`(Directus 配置)/ `ai-news-agent`(Hermes Agent)/ `ai-news-n8n-workflows`(workflow JSON)|
 
 ## 附录 B:参考文档
 
