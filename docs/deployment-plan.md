@@ -12,7 +12,11 @@
 > - 🟡 **默认假设**: 等 mentor 回复前我采用的默认方案,回复后可能微调
 > - ⏳ **待 mentor 确认**: 没有答案我不能动笔的卡点
 >
-> 当前状态:**第三轮调整 — GPT review 整合**(2026-06-11)。基于第二轮 (Authentik 模板填充) 后,GPT review 提出 10 条改进意见,本轮全部 address:DB 独占强化 / lifecycle hooks 部署具体化 / Flow 触发严格化 / role mapping MVP 简化 / 取消自动 schema apply / 取消自动 n8n import / 加跨 service 网络 smoke test / 澄清 WP draft vs publish / 补 idempotency 细节 / MVP scope 收敛。剩余开放项见 Section 11。
+> 当前状态:**第四轮调整 — Architecture second-pass review 整合**(2026-06-11 晚)。GPT 第二轮 review 提出 25 条 finding,本轮 address 了所有 Critical + 高优 Medium:
+> - **Critical**:D1 Unclassified queue / D2 Agent 本地 sqlite 防丢 / D4 WP 重复发布两道防线 / A1 Phase 0 Hermes spike
+> - **Medium**:O1 cache 简化、O2 Agent 自带 cron、O3 单 compose project、A4 今天就跑 DNS sanity check、C1 watchdog workflow、C2 source_url 规范化规则、B1 reviewed_by 主动 strip、B2 actor-aware status guard、H1 hook 复杂度行为型阈值、H2 外部 webhook 强制走 Flow
+> 
+> 剩余 Low / Phase 2 项见 Section 12。**3 个 mentor escalations**(Q5 / Q6 / Q8)见 Section 11。
 
 ---
 
@@ -94,12 +98,18 @@
 
 ## 3. 新增服务清单
 
-本项目需要在 Dokploy 上新增以下 services:
+🟢 **本项目用单个 Dokploy compose project `ai-news`**(per arch review O3),包含下面 3 个 service 在同一个 `docker-compose.yml`:
 
-| 序号 | Service 名 | Image | 域名 | 对外暴露 | 备注 |
+| 序号 | Service 名(compose 内) | Image | 域名 | 对外暴露 | 备注 |
 |---|---|---|---|---|---|
-| 1 | `cms` (Directus) | `directus/directus:11.5.x` (pin)| `cms.epochtimesnw.com` | ✅ 编辑访问 | 内置 PG |
-| 2 | `hermes-agent` | 自构建(Node 18 / 20) | — | ❌ 内部 worker | 无 PG |
+| 1 | `directus` | `directus/directus:11.5.x` (pin)| `cms.epochtimesnw.com` | ✅ 编辑访问 | Directus CMS |
+| 2 | `postgres` | `postgres:16-alpine`(pin)| —(内网)| ❌ | Directus 业务 DB |
+| 3 | `hermes-agent` | 自构建(Node 18 LTS)| —(内网)| ❌ 内部 worker,自带 cron | 无 PG,有本地 sqlite cache(防丢)|
+
+**为什么单 compose project**:
+- 同 compose project 内 service 名 100% 解析,**避开跨 project DNS 风险**(arch review A4 / O3)
+- 单一部署单元,减少 Dokploy 协调成本
+- n8n 仍在现有 project,通过公网 URL 调用(`n8n.epochtimesnw.com/webhook/...`)互通
 
 **不新增的服务**(沿用现有):
 
@@ -247,14 +257,38 @@ networks:
 
 **HLD Section 5 列了一组关键 hooks,本节定具体怎么落地**。
 
-##### Hooks 清单(per HLD)
+##### Hooks 清单(per HLD + arch review)
 
 | Hook | 职责 |
 |---|---|
-| `articles.beforeCreate` | (1) 规范化 `source_url`;(2) 初始化 `final_title = ai_title` / `final_content = ai_content` / `final_summary = ai_summary`(一次性 INSERT 不要 afterCreate) |
-| `articles.beforeUpdate` | **仅当 `status` 字段本身变化时**(`if oldRecord.status !== newRecord.status`)跑下面这些校验:<br>(a) 状态转移合法性(只允许 HLD 状态机定义的 transition)<br>(b) `content_type` 非 NULL 当 `status` 转到 `PUBLISHING`(否则返 422)<br>(c) **仅当 editor 把 `PENDING → PUBLISHING`** 时写 `reviewed_by = currentUser.id`;n8n service account 后续 PATCH per-platform 字段时不要覆盖<br>(d) 阻止 `ai_*` 和 `source_*` 字段修改(field permission 兜底)|
-| `articles.afterCreate` | 调 n8n `send-notification` webhook 通知 "新文章入库"(可选) |
-| `articles.afterUpdate` | 如果 status 转到 `REJECTED` / `PUBLISHED` / `FAILED`,调 n8n `send-notification`(可选,或者用 Directus Flow 替代,见 4.1.8)|
+| `articles.beforeCreate` | (1) 规范化 `source_url`(见下方"source_url 规范化规则",arch review C2);(2) 初始化 `final_title = ai_title` / `final_content = ai_content` / `final_summary = ai_summary`(一次性 INSERT 不要 afterCreate) |
+| `articles.beforeUpdate` | **仅当 `status` 字段本身变化时**(`if oldRecord.status !== newRecord.status`)跑校验。**Actor-aware**(arch review B2): 根据 `currentUser.role` 区分允许的转移<br><br>**editor**:`PENDING → PUBLISHING` / `PENDING → REJECTED` / `REJECTED → PENDING`<br>**admin**:editor 所有 + `FAILED → PUBLISHING`(retry)<br>**service account (n8n)**:`PUBLISHING → PUBLISHED/FAILED` / `FAILED → PUBLISHING`(自动 retry)<br><br>**其他规则**:<br>(a) `content_type` 非 NULL 当 `status` 转到 `PUBLISHING`(否则返 422)<br>(b) **仅当 editor 把 `PENDING → PUBLISHING`** 时写 `reviewed_by = currentUser.id`<br>(c) **若 PATCH 来自 service account 且 body 包含 `reviewed_by`,主动 strip 该字段**(arch review B1,双重防御:不只是拒绝,主动清掉)<br>(d) 阻止 `ai_*` 和 `source_*` 字段修改(field permission 兜底)|
+| `articles.afterCreate` / `afterUpdate` | **MVP 不在 hook 里调外部 webhook**(arch review H2)。所有外部通知用 **Directus Flow**(见 4.1.8),Flow 有内置 retry 和 visibility,hook 没有 |
+
+##### source_url 规范化规则(arch review C2)
+
+`beforeCreate` 第 (1) 步具体规则,防止 utm_/fbclid/scheme/case 差异导致同一文章被入多次:
+
+```
+1. lowercase hostname:        Example.COM → example.com
+2. force scheme to https://:  http:// → https://
+3. strip fragment:            url#section → url
+4. strip query params 匹配:    ^(utm_|fbclid|gclid|ref_|aff_)
+5. strip trailing slash:      /article/ → /article
+```
+
+实现:用纯 TypeScript 函数,在 hook 里调,**也要有 unit test 覆盖每条规则**。
+
+##### Hook 复杂度阈值(arch review H1 — 改 "50 行" 为行为型标准)
+
+| ✅ Hook 适合 | ❌ Hook 不适合 → 挪到 NestJS / 独立服务 |
+|---|---|
+| 单 entity 字段读 / 写 / 校验 | 跨 entity 事务(Directus extension 无事务保证) |
+| 纯校验(状态机 / 必填 / 格式) | 调外部 HTTP service(失败 = CRUD 阻塞,糟糕 UX) |
+| 字段映射 / 初始化 / 规范化 | 多分支业务逻辑超过 3 个 case |
+| 同步、in-process、确定性 | 需要 mock 多个依赖单测(extension 测试框架弱) |
+
+**"50 行" 不是判定标准,行为模式才是**。一个 200 行的纯字段映射 hook 比 30 行调外部 service 的 hook 更安全。
 
 ##### 打包 / 版本控制
 
@@ -298,9 +332,13 @@ ai-news-cms/   ← git repo
 
 🔴 **为什么 condition 这么严格**:n8n 在 publish 过程中会回 PATCH `wp_status` / `tweet_status` / `status` 等字段。**如果 Flow trigger 只看 "status 是否 PUBLISHING",n8n 把 status 再写一遍 PUBLISHING(即使没真变化)会误触发**。加 `old.status != "PUBLISHING"` 确保**只在状态首次进入 PUBLISHING** 时触发,后续 n8n 回写不会重复触发 publish。
 
-**其他 Flow**(可选,Phase 2):
-- `articles.status → REJECTED` → 触发 send-notification webhook
-- `articles 新创建` → 触发 send-notification webhook(也可以放 afterCreate hook 里,二选一)
+**其他 Flow**(MVP 推荐做,因为 hook 不再调外部 webhook,见 H2):
+- `articles.status → REJECTED` → 触发 send-notification webhook(Telegram 告知 reviewer)
+- `articles 新创建`(afterCreate)→ 触发 send-notification webhook(Telegram 通知编辑群"新文章入库")
+- `articles.status → PUBLISHED` → send-notification(发布成功通知)
+- `articles.status → FAILED` → send-notification(发布失败告警)
+
+🔴 **规则(arch review H2)**:外部 service 调用一律走 Flow,不走 Hook。Flow 失败有 Directus 内置重试 + 可见性;Hook 失败会阻塞 CRUD 操作。
 
 ---
 
@@ -308,67 +346,134 @@ ai-news-cms/   ← git repo
 
 > 🔴 **重要约束**:Hermes Agent **不允许直连 Directus 的 Postgres**。所有 articles / categories 操作走 Directus REST API。
 
+> ⚠️ **Phase 0 必须 spike**(arch review A1):Hermes Agent 是否真的能跑、能装、抓中文新闻可用——Week 1 前 2 天验证。**spike 不过立刻切 Playwright fallback**,per HLD Section 10 风险表。
+
 #### 4.2.1 角色
 
-- 定时(由 n8n cron 触发)抓取新闻源
-- AI 分类(关键词 + Claude 语义匹配)
+- **自带 cron 定时**抓取新闻源(arch review O2:不再用"n8n cron → HTTP 触发 Agent"的二段链路)
+- AI 分类(MVP **只调 Claude 语义匹配**;关键词预筛 Phase 2 再加,arch review O1 简化)
 - 调 Claude API 改写
-- POST 到 Directus `/items/articles` 入库
+- **先写本地 sqlite cache,再 POST 到 Directus**(arch review D2 防丢)
+- POST 失败时本地保留 retry queue,下次 cron 再发
 
 #### 4.2.2 Image
 
-- 自构建:Node 18 LTS + TypeScript(per HLD `Hermes Agent` 是 Node 服务)
+- 自构建:Node 18 LTS + TypeScript
+- 包含: `node-cron` 包(内部定时)、`better-sqlite3` 包(本地持久化)、Anthropic SDK
 - 🟡 Dockerfile 在 Hermes Agent 仓库里
 
-#### 4.2.3 Compose 草稿
+#### 4.2.3 Compose 草稿(单 compose project 内,跟 directus 共用)
 
 ```yaml
+# 在 ai-news compose project 的 docker-compose.yml 里, hermes-agent 跟 directus 同 project
 services:
   hermes-agent:
     build:
-      context: .
+      context: ./hermes-agent
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
       # --- Claude API ---
       ANTHROPIC_API_KEY: ${CLAUDE_API_KEY}
-      CLAUDE_MODEL: claude-haiku-4-5-20251001  # 默认 Haiku, 改写任务足够
+      CLAUDE_MODEL: claude-haiku-4-5-20251001
+      CLAUDE_DAILY_TOKEN_BUDGET: 500000   # 超出 hard-fail + Telegram(arch review A5)
       
       # --- Directus ingestion ---
-      DIRECTUS_URL: https://cms.epochtimesnw.com
-      DIRECTUS_API_TOKEN: ${DIRECTUS_AGENT_TOKEN}  # 在 Directus 后台为 Agent 创建的 API token
+      DIRECTUS_URL: http://directus:8055      # 同 compose 内, 直接走 service 名
+      DIRECTUS_API_TOKEN: ${DIRECTUS_AGENT_TOKEN}
+      
+      # --- Cron schedule ---
+      CRON_HIGH_FREQ: '*/10 * * * *'    # 高频源 (per HLD)
+      CRON_LOW_FREQ: '0 8 * * *'         # 中频源
       
       # --- Misc ---
       LOG_LEVEL: info
       NODE_ENV: production
       TZ: America/Los_Angeles
-    expose:
-      - "8090"   # 内部 trigger endpoint, 给 n8n cron 调用
-    networks:
-      - default
-      - dokploy-network
+    volumes:
+      - hermes_cache:/app/cache              # 本地 sqlite 持久化, 防丢 (arch review D2)
+    # 注意: 没有 expose 端口, 没有 dokploy-network. 完全内部 worker
+    depends_on:
+      directus:
+        condition: service_started
 
-networks:
-  dokploy-network:
-    external: true
+volumes:
+  hermes_cache:
 ```
 
 #### 4.2.4 Domain
 
-❌ **不对外暴露 domain**(跟 News-scraper 一致),只在 `dokploy-network` 内由 n8n 调用 `http://hermes-agent:8090/trigger`。
+❌ **不对外暴露 domain,也不需要 HTTP endpoint**(arch review O2)。Agent 自带 cron 自给自足,n8n 不需要触发它。
 
 #### 4.2.5 Env Vars
 
 | 变量 | 用途 | 来源 |
 |---|---|---|
 | `CLAUDE_API_KEY` | Claude API key | ⏳ mentor 提供(待确认是否公司账号 + cost cap)|
-| `CLAUDE_MODEL` | 用哪个 Claude model | 🟡 默认 Haiku 4.5,后续可调 Sonnet |
-| `DIRECTUS_URL` | Directus 入口 URL | `https://cms.epochtimesnw.com` |
+| `CLAUDE_MODEL` | 用哪个 Claude model | 🟡 默认 Haiku 4.5 |
+| `CLAUDE_DAILY_TOKEN_BUDGET` | 每日 token 上限(超出 hard fail)| 🟡 默认 500K,根据真实 Claude 用量调 |
+| `DIRECTUS_URL` | Directus 入口 URL | **内部** `http://directus:8055`(同 compose project) |
 | `DIRECTUS_AGENT_TOKEN` | Directus API token | Directus 后台为 Agent 创建一个 service account |
+| `CRON_HIGH_FREQ` / `CRON_LOW_FREQ` | 抓取定时 | 🟡 per HLD 推荐 |
 
 #### 4.2.6 Volumes
 
-- 无持久化(stateless worker,跟 News-scraper 一致)
+- `hermes_cache`:本地 sqlite,存抓取 + 改写完成但尚未成功 POST 到 Directus 的文章(arch review D2)。每次 cron 跑前先扫这个,把 pending writeback 文章先重发
+
+#### 4.2.7 本地持久化 + 防丢策略(arch review D2 + D3)
+
+**问题**:Network 5xx 重试耗尽 / Directus 短时宕 / Claude API 永久失败 → article 静默丢失。
+
+**MVP 防丢流程**:
+
+```
+Cron tick:
+1. (启动时一次) 加载 categories 进内存 map (arch review O1, 不 TTL refresh)
+
+2. 扫描 hermes_cache.db, 找 pending writeback 文章 → 先重发到 Directus
+   - 成功: 从 cache 删
+   - 失败 (5xx 持续): 留着, 下次再试
+
+3. 抓取新闻源 (Hermes Agent / Playwright)
+   - 对每篇:
+     - 写入 cache: hermes_cache.db (status=raw)
+     - 改写 (Claude)
+     - 写入 cache: hermes_cache.db (status=rewritten)  ← Claude 永久失败时, 留 raw 状态
+     - AI 分类
+     - 找 category_id:
+       - 找到: 用
+       - 找不到 (信心 < 阈值 或 cache miss): 用 NULL (arch review D1 Unclassified queue)
+     - POST 到 Directus
+     - 成功: cache 里删除该 record
+     - 失败 (422 unique conflict): cache 里删除 + log "already in Directus"
+     - 失败 (其他 4xx / 5xx 重试耗尽): cache 留 status=pending_writeback, 下次再试
+
+4. Claude API 永久失败 (content policy / 模型错):
+   - 留在 cache (status=rewritten=null), 标 manual_review_required
+   - Telegram 告警, 让 admin 看 cache 里这条决定: 手动改写? 删除?
+```
+
+**Cache schema**(sqlite):
+
+```sql
+CREATE TABLE article_cache (
+  id INTEGER PRIMARY KEY,
+  source_url TEXT UNIQUE,
+  source_data JSON,            -- 抓取的原始
+  ai_data JSON,                -- Claude 改写结果, NULL 表示改写失败
+  category_id TEXT,            -- NULL 表示 unclassified
+  status TEXT,                 -- 'raw' / 'rewritten' / 'pending_writeback' / 'manual_review'
+  error_log TEXT,
+  retries INTEGER DEFAULT 0,
+  created_at INTEGER,
+  updated_at INTEGER
+);
+```
+
+**好处**:
+- ✅ D2 解决:Network 故障不丢
+- ✅ D3 解决:Claude 永久失败不丢,等人 review
+- ✅ Phase 2 升级方便:加 "pending writeback 老化告警"、"manual_review 队列 UI"
 
 ---
 
@@ -421,7 +526,9 @@ networks:
 - 创建完每个 workflow,**export JSON 提交进 git** 作为备份 + 文档(`ai-news-n8n-workflows/workflows/*.json`)
 - ⚠️ **MVP 不做自动 import**:从 JSON 自动 import 到现有 n8n 涉及 credentials 重新绑定 / 跨实例引用问题,工作量大,容易踩坑。**Phase 2 再做自动化**
 
-#### 4.3.6 Publish workflow Idempotency(per HLD)
+#### 4.3.6 Publish workflow Idempotency 与重复发布防护
+
+##### 基础 idempotency(per HLD)
 
 n8n 调外站 API 前,**必须先查 Directus 当前文章状态**,避免重复发布:
 
@@ -440,12 +547,74 @@ publish-article workflow 入口:
 
 retry-publish workflow 同样规则:**只重试 FAILED 的平台,PUBLISHED 的跳过**。
 
-**实现要点**:
-- workflow 第一个 node 调 Directus GET 拿当前状态
-- 用 If / Switch node 按状态决定走 ARTICLE / SHORT / skip 分支
-- 永远不假定"PUBLISHING 一定要走完所有发布步骤" —— 因为 retry 时一些步骤已经成功
+##### 🔴 Writeback 失败防双发(arch review D4)
 
-📌 严格防止 **WordPress 重复发同一篇 + Twitter 重复推同一条**。
+**问题场景**:n8n 调 WP POST 成功 → WP 已经有文章 → n8n 回写 Directus 失败(network/Directus 短宕)→ Directus 还认为 `wp_status` 未更新 → 下次 retry 看到 wp_status != PUBLISHED → **第二次 POST 到 WP → WP 出现两篇相同文章**。
+
+基础 idempotency 不解决这个,因为 Directus 状态滞后。**MVP 加两道防线**:
+
+**防线 1:writeback 激进重试 + 高优告警**
+
+```
+WP POST 成功 →
+  PATCH Directus wp_*, attempt 1
+    fail (network) →
+  PATCH attempt 2 (wait 1s)
+    fail →
+  PATCH attempt 3 (wait 4s)
+    fail →
+  PATCH attempt 4 (wait 16s)
+    fail →
+  PATCH attempt 5 (wait 60s)
+    fail →
+  🚨 CRITICAL:
+    - Telegram 告警: 包含 article_id + wp_post_id + wp_url, 让 admin 手动 sync
+    - 在 Directus 写 manual_intervention_required=true (新增字段) 
+      防止任何 workflow 自动碰这条
+```
+
+**防线 2:WP 端 source_url 查重(MVP 第一道关键防御)**
+
+WP publish 前,n8n 先查 WP 是否已有同 source_url 的文章。Directus 状态不可信的时候,**WP 自己是 source of truth**:
+
+```
+publish to WP 前:
+  GET https://www.epochtimesnw.com/wp-json/wp/v2/posts?meta_key=source_url&meta_value=<url>
+       ↓
+  if exists (wp_post_id 已存在):
+    跳过 POST, 把已存在的 wp_post_id 回写 Directus
+    log "skip_publish: already exists in WP"
+  else:
+    正常 POST
+    回写 Directus (适用防线 1)
+```
+
+**前提**:WP publish 时把 `source_url` 存 post meta(WP REST API 支持 `meta` 字段)。**这个改动 MVP 必须做**,否则查重无解。
+
+##### Schema 新增字段(arch review D4)
+
+加 1 个字段到 articles collection:
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `manual_intervention_required` | BOOLEAN, default false | writeback 永久失败时 hook 写 true,任何 workflow 看到 true 跳过自动处理,只 admin 手动恢复 |
+
+⚠️ HLD schema 没有这个字段,这是 plan 这里加的。**回头 HLD 应同步更新**。
+
+#### 4.3.7 Watchdog workflow:防卡死(arch review C1)
+
+**问题**:Directus Flow 触发 webhook 但 n8n 短时挂 / workflow 跑挂 → article 卡在 PUBLISHING 永远没人发现。
+
+**新增 workflow:`news/watchdog`**
+
+| 字段 | 值 |
+|---|---|
+| Trigger | n8n Cron: `*/15 * * * *`(每 15 min)|
+| Query | `GET cms.../items/articles?filter[status][_eq]=PUBLISHING&filter[updated_at][_lt]={now - 30 min}` |
+| Action | 对每条:触发 `news/retry-publish`(走 4.3.6 的 idempotency) |
+| 告警 | 如果连续 3 次同一 article 仍在 PUBLISHING → Telegram CRITICAL 告警 |
+
+📌 MVP 一定做。卡死的 article 不能等编辑发现。
 
 ---
 
@@ -728,20 +897,25 @@ services:
 
 #### 🟢 MVP 必须做(证明 chain 跑通的最小集)
 
-> 目标:**Agent → Directus → n8n → WP(live 或 draft) → Telegram 通知** 完整跑通
+> 目标:**Agent → Directus → n8n → WP(live 或 draft) → Telegram 通知** 完整跑通,**且不丢、不重复、不卡死**
 
 | 项 | MVP 状态 |
 |---|---|
 | Directus 部署 + Authentik SSO(默认 editor + 手动 admin) | ✅ |
-| Hermes Agent 部署 + Claude 改写 + POST 到 Directus | ✅ |
-| n8n 复用现有实例 + 3 个核心 workflow(publish / retry / notify) | ✅ |
+| Hermes Agent 部署 + **自带 cron**(arch O2)+ Claude 改写 + POST 到 Directus | ✅ |
+| Hermes Agent **本地 sqlite cache 防丢**(arch D2 / D3) | ✅ 4.2.6 / 4.2.7 |
+| **Unclassified queue**(分类失败的文章 category=NULL 入库,arch D1) | ✅ |
+| n8n 复用现有实例 + **4 个核心 workflow**(publish / retry / notify / **watchdog**) | ✅ 4.3.7 watchdog 新加 |
 | WordPress 发布到 wp-seaeet(live 默认,draft 仅冒烟测试用) | ✅ |
-| Telegram 通知 | ✅ |
-| Directus lifecycle hooks(beforeCreate / beforeUpdate)| ✅ |
-| Directus Flow 触发 publish workflow(condition 严格 see 4.1.8)| ✅ |
-| n8n idempotency(按 wp_status/tweet_status 跳过已 PUBLISHED 平台,see 4.3.6)| ✅ |
+| **WP POST 前先查 source_url 防重复**(arch D4 防线 2) | ✅ 4.3.6 |
+| **n8n writeback 失败激进重试 + manual_intervention 字段**(arch D4 防线 1) | ✅ 4.3.6 |
+| Telegram 通知(所有 send-notification 走 Directus Flow,不走 hook,arch H2) | ✅ |
+| Directus lifecycle hooks(beforeCreate / beforeUpdate)+ **actor-aware status guard**(arch B2) | ✅ 4.1.7 |
+| **source_url 规范化规则**(arch C2) | ✅ 4.1.7 |
+| Directus Flow 触发 publish workflow(condition 严格 see 4.1.8) | ✅ |
 | dev WP 用本地 container,prod WP 用 wp-seaeet | ✅ |
 | 手动 import n8n workflow / 手动 apply Directus schema 到 prod | ✅ |
+| **单 compose project (`ai-news`)**(arch O3:避开跨 project DNS 风险) | ✅ Section 3 |
 
 #### 🟡 Phase 2 改进(MVP 之后再做)
 
@@ -761,25 +935,33 @@ services:
 ### 9.1 阶段划分(跟 internship-plan.md Week 7-8 对齐)
 
 ```
+🔴 Phase 0: spike (Week 1 前 2 天, arch review A1) — pre-Phase-1 必做
+  - 装 Hermes Agent, 跑 1 个真实新闻源 + 1 个 Claude 改写
+  - spike 通过: 继续 plan
+  - spike 失败: 切 Playwright + cron fallback, 调整 plan
+
 Phase 1: dev 部署 + 联调  (Week 7 上半)
   - Directus dev 起来 + Authentik OIDC 接通
-  - Hermes Agent dev 跑通 1 篇文章入库
-  - 现有 n8n 跑通 `news/publish-article` workflow (发本地 dev WP)
-  - lifecycle hooks 验证
-  - 跨 service 网络连通验证 (见 10.0)
+  - Hermes Agent dev 跑通 1 篇文章入库 (含 sqlite cache 防丢)
+  - 现有 n8n 跑通 `news/publish-article` + `news/watchdog` workflow
+  - lifecycle hooks 验证 (含 actor-aware status guard, source_url 规范化)
+  - WP source_url meta 字段查重路径验证
+  - 跨 service 网络连通验证 (见 10.0, 同 compose project 内应该 0 风险)
 
 Phase 2: prod 部署 + 冒烟测试  (Week 7 下半)
   - prod 端 Directus + Agent 部署
   - 跑 1 篇真新闻全链路, workflow 临时切到 WP draft 避免污染生产
   - 测完恢复 workflow 默认 live publish
-  - schema apply 到 prod (手动 SSH 上去跑)
+  - schema apply 到 prod (手动 SSH 上去跑, 见 6.3)
+  - 模拟 writeback 失败场景: 验证防线 1 + 防线 2 都 work
 
 Phase 3: 切量上线  (Week 8)
   - 编辑账号:Authentik 已有就直接登; 没账号的 mentor 给开
   - 首批编辑首登后, 手动指派一名 admin
   - category 初始化 + 给编辑分 assigned_categories
-  - Agent cron 真启动 (n8n 触发, 频率按需配)
+  - Agent cron 真启动 (Agent 自带, 频率按 4.2.5 env)
   - 监控 + 告警接通 Telegram
+  - watchdog cron 启动: 每 15 min 扫卡死 article
 ```
 
 ### 9.2 News-scraper / news-gateway 处置
@@ -794,34 +976,32 @@ Phase 3: 切量上线  (Week 8)
 
 每个 phase 结束时跑下面这些验证。
 
-### 10.0 部署前必跑:跨 service 网络连通
+### 10.0 跨 project DNS sanity check(**今天就跑**,arch review A4)
 
-🔴 **重要前提**:Hermes Agent 在自己的 compose project,n8n 在另一个 compose project(`production-n8nwithpostgres-*`),它们能不能通过 service 名互相找到,取决于 Dokploy 的 `dokploy-network` 行为。**MVP 部署前必须验证**:
+**重要前提**:MVP 已经把 Hermes Agent 跟 Directus 放进同一个 compose project (`ai-news`),所以 **Hermes ↔ Directus 同 project 内 service 名解析 100% 工作,无风险**。
+
+但 **n8n 跟 Directus 跨 project 的访问**还需要验证:
+- n8n 在 `production-n8nwithpostgres-*` project
+- Directus 在 `production-ainews-*` project(待部署)
+- n8n workflow 需要调 `https://cms.epochtimesnw.com/items/articles/{id}`(走公网 URL)
+- 公网 URL 已经是走 Traefik,**实际不依赖跨 project DNS**
+
+**今天预先验证**(不等部署):n8n container 能从内网调到现有有 domain 的 service 吗?
 
 ```bash
-# 在 ovh-prod-eet 上:
+ssh ubuntu@ovh-prod-eet
 
-# (a) 找现有 n8n 容器
-sudo docker ps --filter "name=n8n" --format "{{.Names}}"
+# 找现有 n8n container
+NCT=$(sudo docker ps --filter "name=n8n" --format "{{.Names}}" | head -1)
 
-# (b) 进去测试能不能 ping / curl Hermes Agent (假设 Hermes 已部署)
-sudo docker exec <n8n-container> sh -c "curl -sS http://hermes-agent:8090/health"
+# 测试调现有 outline 的公网 URL (outline 有 domain wiki.epochtimesnw.com)
+sudo docker exec $NCT sh -c "curl -sS https://wiki.epochtimesnw.com/ -o /dev/null -w '%{http_code}\n'"
 
-# 预期: 返回 200 / OK
-# 如果 connection refused / could not resolve:
-#   → 跨 project 在 dokploy-network 上不能解析 service 名
-#   → 需要给 Hermes Agent compose 加 network alias:
-#         services:
-#           hermes-agent:
-#             networks:
-#               dokploy-network:
-#                 aliases:
-#                   - hermes-agent
-#   → 或用 Hermes Agent container 的内部 IP(查 `docker inspect`)
-#   → 或暴露一个内网 domain(通过 Traefik 但不开公网)
+# 预期: 200 (说明 n8n container 出网正常, 能调任何 https 服务)
+# 失败 (无法解析 / connection refused): n8n container 网络配置受限, 要 mentor 排查
 ```
 
-📌 **如果验证失败**,plan 里 Section 4.2 / 4.3 关于 n8n → Hermes Agent 的访问方式需要调整。
+📌 **这个测试 ROI 很高**:验证 n8n → 公网 URL 通,意味着 plan 里 "n8n 通过 cms.epochtimesnw.com 调 Directus" 路径可行。**今天就跑,不要等部署**。
 
 ### 10.1 Phase 1 验收(dev 环境联调)
 
@@ -879,8 +1059,12 @@ sudo docker exec <n8n-container> sh -c "curl -sS http://hermes-agent:8090/health
 | Q2 | n8n 复用还是新建 + 接入方式 | 4.3 n8n 部署方案 | ✅ mentor 答(2026-06-10):**复用现有 n8n,不接 SSO** |
 | Q3 续 | dev / staging WP 怎么办 | 7.2 dev WP 方案 | 🟡 mentor 部分答(确认 prod=wp-seaeet),dev 用本地 container 默认推进 |
 | — | Authentik 后台访问权限 | 5 Authentik 集成细节 | 🟡 web admin 因 "external user" 进不去,**已通过 SSH + docker exec 拿到现有配置作模板**(2026-06-11)。仍待 mentor 升 internal 方便后续维护 |
-| Q4 | Authentik `groups` scope + Property Mapping 是否可用 | 5.3 / 5.4 role 映射方案 | 🟢 **不再阻塞**:MVP 改用"默认 editor + 手动 admin"方案(per GPT review 建议),groups 推到 Phase 2;mentor 方便时再确认 Phase 2 可行性 |
+| Q4 | Authentik `groups` scope + Property Mapping 是否可用 | 5.3 / 5.4 role 映射方案 | 🟢 **不再阻塞**:MVP 改用"默认 editor + 手动 admin"方案,groups 推到 Phase 2;mentor 方便时再确认 Phase 2 可行性 |
 | — | Twitter 账号(Vision 写"待建立")| Twitter 分发部分可能推迟到 Phase 2 | 🟡 待 mentor 确认是否 MVP 先只做 WP |
+| **Q5** | 🔴 **Hermes Agent 可用性 spike**(arch review A1)| 整个 Phase 1 plan 能不能跑 | ⏳ Phase 0 必做(Week 1 前 2 天),mentor 协调时间 + 提供 access |
+| **Q6** | 🟡 Authentik `groups` Property Mapping 5 分钟 spike(arch A2)| 5.3 是否可以直接走 group-based | ⏳ mentor 进 Authentik admin → Customisation → Property Mappings,看有没有 `Groups in JWT` 现成 mapping |
+| **Q7** | 🟡 Directus 11 OIDC discovery URL 行为(arch A3)| 5.2 Step 3 配置方案 | ⏳ dev 阶段 spike 验证 `curl <issuer>/.well-known/openid-configuration`,失败的话 fallback 到 per-endpoint 配置 |
+| **Q8** | 🟡 WP 端能否给 post 加 `source_url` meta 字段(arch D4 防线 2)| 4.3.6 防重复发布查重路径 | ⏳ MVP 必须能做,否则 D4 防线 2 不通。WP REST API 支持 meta,但需要 wp-seaeet 的主题 / 插件不冲突 |
 
 ---
 
