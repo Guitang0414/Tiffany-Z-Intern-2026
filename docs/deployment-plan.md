@@ -12,11 +12,12 @@
 > - 🟡 **默认假设**: 等 mentor 回复前我采用的默认方案,回复后可能微调
 > - ⏳ **待 mentor 确认**: 没有答案我不能动笔的卡点
 >
-> 当前状态:**第四轮调整 — Architecture second-pass review 整合**(2026-06-11 晚)。GPT 第二轮 review 提出 25 条 finding,本轮 address 了所有 Critical + 高优 Medium:
-> - **Critical**:D1 Unclassified queue / D2 Agent 本地 sqlite 防丢 / D4 WP 重复发布两道防线 / A1 Phase 0 Hermes spike
-> - **Medium**:O1 cache 简化、O2 Agent 自带 cron、O3 单 compose project、A4 今天就跑 DNS sanity check、C1 watchdog workflow、C2 source_url 规范化规则、B1 reviewed_by 主动 strip、B2 actor-aware status guard、H1 hook 复杂度行为型阈值、H2 外部 webhook 强制走 Flow
+> 当前状态:**第五轮调整 — Self-tests 验证 + Authentik discovery URL 收获**(2026-06-11 晚)。
+> - Self-Test 1(arch A4 DNS sanity check)✅ 通过 → 10.0 标已验证
+> - Self-Test 2(arch A3 Authentik discovery URL)✅ 通过,**并发现 `claims_supported` 含 groups,意味着 MVP 可走 group-based mapping 不用 fallback**
+> - 5.0 / 5.3 / 5.4 / 10.0 / 11 都基于新发现更新
 > 
-> 剩余 Low / Phase 2 项见 Section 12。**3 个 mentor escalations**(Q5 / Q6 / Q8)见 Section 11。
+> 剩余 mentor escalations 缩减到 **2 个**:Q5(Hermes spike) + Q8(WP source_url meta)。其他能自测的都自测完了。
 
 ---
 
@@ -622,19 +623,28 @@ publish to WP 前:
 
 🟢 **2026-06-11:通过 SSH 进入生产服务器(`ovh-prod-eet`),从现有 outline 服务的 container env 中读到了真实 OIDC 配置作为模板**。本节基于这些真实值给 Directus 集成定方案。
 
-### 5.0 公司 Authentik 集成 pattern(从 outline 反推)
+### 5.0 公司 Authentik 集成 pattern(从 outline 反推 + discovery URL 验证)
+
+**2026-06-11 通过 `curl auth.epochtimesnw.com/application/o/outline/.well-known/openid-configuration` 拿到完整 discovery JSON,以下都是验证过的真实值**:
 
 | 维度 | 实际值 |
 |---|---|
 | Authentik 公网 URL | `https://auth.epochtimesnw.com` |
 | OIDC issuer base | `https://auth.epochtimesnw.com/application/o/` |
 | 每个 application 的 issuer | `https://auth.epochtimesnw.com/application/o/<slug>/` (例: outline 的是 `.../o/outline/`) |
+| Discovery URL | `<issuer>/.well-known/openid-configuration` —— **🟢 验证可用,返回完整 OIDC config JSON** |
 | Tenant-global endpoints | `/application/o/authorize/` / `/token/` / `/userinfo/` |
 | Per-app endpoint | `/application/o/<slug>/end-session/` |
-| outline 实际申请 scopes | `openid profile email` ⚠️ **没申请 `groups`** |
+| outline 实际申请 scopes | `openid profile email` |
+| Authentik 支持的 scopes | `openid email profile` ⚠️ **不包括 `groups` scope** —— 不能写 `OIDC_SCOPES=...groups` |
+| Authentik 支持的 claims | 标准 OIDC claims + **`groups`** ✅ —— **groups claim 自动包含在 id_token 里,不需要额外 scope** |
 | Username claim | `email` |
 | Display name (SSO 按钮) | `Authentik` |
 | Client ID 格式 | 40 字符随机串(Authentik 自动生成)|
+| ID Token 签名算法 | `RS256` |
+| Grant types 支持 | `authorization_code` + `refresh_token` + 其他 |
+
+🔑 **关键洞察**:`claims_supported` 列表里有 `groups`(虽然 `scopes_supported` 没有 `groups` scope)。**意思是**:Authentik 默认在 id_token 里塞 groups,**Directus 申请标准 scopes 就能拿到 groups claim**,不用 mentor 加额外 Property Mapping。**outline 没用 groups 只是它代码没读这个 claim,不代表 Authentik 不返回**。
 
 ### 5.1 集成范围
 
@@ -679,44 +689,43 @@ DIRECTUS_DEFAULT_ROLE_ID = <Directus 后台创建 editor role 后的 id>
 
 💡 **用 issuer URL 而不是逐个 endpoint URL**:Directus 支持 OIDC discovery,只要给 issuer URL,会自动从 `<issuer>/.well-known/openid-configuration` 拿到所有 endpoint。比 outline 用的"每个 endpoint 一个 env"省事得多。
 
-### 5.3 Group / Role mapping
+### 5.3 Group / Role mapping(**MVP 用 group-based,基于 2026-06-11 discovery URL 验证**)
 
-#### 🟢 MVP 方案(简化,不依赖 `groups` scope)
+#### 🟢 MVP 方案:Group-based 自动 mapping(per HLD 原设计)
 
-**已观察**:outline 实际只申请 `openid profile email`,**没用 `groups`**。这暗示公司 Authentik 可能还没标配 group claim mapping。MVP **不依赖 groups,避免实施阻塞**:
+**2026-06-11 验证**:Authentik discovery URL 返回的 `claims_supported` 包含 `groups`,说明 Authentik 默认在 id_token 里塞 group 信息,**Directus 申请标准 scopes 就能拿到**。所以 MVP 可以直接用 group-based mapping,**不用 fallback**。
 
-1. **所有 Authentik SSO 登录的用户,Directus role 默认 = `editor`**
-   - 通过 `AUTH_AUTHENTIK_DEFAULT_ROLE_ID` env 实现
-2. **`admin` role 在 Directus 后台手动指派**
-   - mentor 或现有 admin 进 Data Studio → Users → 把某用户 role 改成 `admin`
-   - 频率很低(只有少数 admin),不构成负担
-3. Directus env `OIDC_SCOPES = openid profile email`(跟 outline 一致,**不改公司默认配置**)
+##### 步骤
 
-**为什么这样设计**:
-- 不需要 mentor 在 Authentik 后台加 group Property Mapping → **避免改公司共用配置**
-- 跟现有 service(outline)风格一致 → 降低集成风险
-- 实施零阻塞,**Q4 的答案不影响 MVP 推进**
+1. **mentor 在 Authentik 创建 group**:
+   - 🟡 `news-editor`(默认)
+   - 🟡 `news-admin`(默认)
+2. **Directus 创建对应 role**:`editor` / `admin`
+3. **Directus env**:
+   ```
+   OIDC_SCOPES = openid email profile        ← 跟 outline 一致,不申请 groups scope
+   ```
+   ⚠️ **不要写** `OIDC_SCOPES = ...groups` —— Authentik `scopes_supported` 没有 groups scope,会拒绝。groups claim 是默认包含在 id_token 里的(per `claims_supported`),不需要单独 scope 触发。
+4. **Directus OIDC role mapping**:
+   - 用户 id_token 里的 `groups` claim 包含 `news-editor` → Directus `editor` role
+   - 包含 `news-admin` → Directus `admin` role
+   - 都不包含 → 不允许登录(或默认 `editor`,保守起见)
 
-#### 🟡 Phase 2:升级到 group-based 自动 mapping
+##### Fallback(如果实施时发现 groups claim 实际不在 token 里)
 
-当满足下列任一时考虑升级:
-- mentor 在 Authentik 后台加了 group Property Mapping(可能为别的项目)
-- 编辑人数增长,手动指派 admin 变烦
-- 引入第二种角色需要细粒度权限
+⏳ 万一 `claims_supported` 写了 groups 但实际 id_token 里没有(Authentik tenant 可能没启用 groups Property Mapping):
 
-升级动作(per HLD 原设计):
-- 在 Authentik 创建 group:`news-editor` / `news-admin`
-- Directus env 改 `OIDC_SCOPES = openid profile email groups`
-- 配 Directus OIDC role mapping:某 group → 某 role
+Plan 退到"默认 `editor` + 手动指派 admin":
+- `OIDC_SCOPES` 不变
+- Directus env 加 `AUTH_AUTHENTIK_DEFAULT_ROLE_ID = <editor role id>`
+- mentor 手动在 Directus 后台把特定用户改 admin
 
-### 5.4 ⏳ Phase 2 跟 mentor 确认:groups scope 可行性(不阻塞 MVP)
+**Phase 1 第一次 SSO 联调时验证**:登录后看 directus_users 表里有没有 groups 信息。
 
-MVP 已用 5.3 方案绕开 `groups`,**这条不阻塞**。但 Phase 2 升级时想知道:
+### 5.4 ✅ Q6 / Q7 已基本回答(2026-06-11 通过自测)
 
-- (a) Authentik 后台是否有现成的 group Property Mapping?(outline 没用,可能只是没用,不代表不能用)
-- (b) 如果没有,Phase 2 时加一个的工作量大约多少?
-
-mentor 方便时答一下,**不答也没关系**。
+- **Q6**(Authentik groups 可用性)🟢 **基本回答**:discovery URL 的 `claims_supported` 包含 groups,MVP 直接用 group-based mapping,不再 fallback。**留一个 verification step**:Phase 1 首次 OIDC 联调时确认 id_token 里真的有 groups claim 数据。
+- **Q7**(Directus 11 OIDC discovery URL)🟢 **已回答**:discovery URL 返回完整有效 JSON,Directus 用 `OIDC_ISSUER_URL` 单 env var 配置方案 100% 可行。
 
 📌 **Category 分配(`assigned_categories`)不从 Authentik 同步**,是 Directus 本地 admin 操作,per HLD 5 章节。
 
@@ -976,32 +985,27 @@ Phase 3: 切量上线  (Week 8)
 
 每个 phase 结束时跑下面这些验证。
 
-### 10.0 跨 project DNS sanity check(**今天就跑**,arch review A4)
+### 10.0 跨 project 网络连通(✅ **2026-06-11 已验证**)
 
-**重要前提**:MVP 已经把 Hermes Agent 跟 Directus 放进同一个 compose project (`ai-news`),所以 **Hermes ↔ Directus 同 project 内 service 名解析 100% 工作,无风险**。
+**前提**:MVP 已经把 Hermes Agent 跟 Directus 放进同一个 compose project (`ai-news`),所以 **Hermes ↔ Directus 同 project 内 service 名解析 100% 工作,无风险**。
 
-但 **n8n 跟 Directus 跨 project 的访问**还需要验证:
-- n8n 在 `production-n8nwithpostgres-*` project
-- Directus 在 `production-ainews-*` project(待部署)
-- n8n workflow 需要调 `https://cms.epochtimesnw.com/items/articles/{id}`(走公网 URL)
-- 公网 URL 已经是走 Traefik,**实际不依赖跨 project DNS**
+**剩下需要验证的**:n8n(在 `production-n8nwithpostgres-*` project)调 Directus(将在 `production-ainews-*` project)走公网 URL `https://cms.epochtimesnw.com/...` 是否可行。
 
-**今天预先验证**(不等部署):n8n container 能从内网调到现有有 domain 的 service 吗?
+#### 验证结果(2026-06-11)
 
 ```bash
 ssh ubuntu@ovh-prod-eet
-
-# 找现有 n8n container
 NCT=$(sudo docker ps --filter "name=n8n" --format "{{.Names}}" | head -1)
+sudo docker exec $NCT sh -c "wget --spider -S https://wiki.epochtimesnw.com/ 2>&1 | head -5"
 
-# 测试调现有 outline 的公网 URL (outline 有 domain wiki.epochtimesnw.com)
-sudo docker exec $NCT sh -c "curl -sS https://wiki.epochtimesnw.com/ -o /dev/null -w '%{http_code}\n'"
-
-# 预期: 200 (说明 n8n container 出网正常, 能调任何 https 服务)
-# 失败 (无法解析 / connection refused): n8n container 网络配置受限, 要 mentor 排查
+# 输出:
+#   Connecting to wiki.epochtimesnw.com (51.81.203.38:443)
+#   HTTP/1.1 200 OK
+#   Alt-Svc: h3=":443"; ma=2592000
+#   ...
 ```
 
-📌 **这个测试 ROI 很高**:验证 n8n → 公网 URL 通,意味着 plan 里 "n8n 通过 cms.epochtimesnw.com 调 Directus" 路径可行。**今天就跑,不要等部署**。
+✅ **n8n container 能从内网调外网 HTTPS URL 并返回 200**。DNS 解析 + 出网 + TLS 全通。意味着将来 n8n workflow 调 `https://cms.epochtimesnw.com/items/articles/{id}` **网络路径已 pre-validated**。
 
 ### 10.1 Phase 1 验收(dev 环境联调)
 
@@ -1062,9 +1066,10 @@ sudo docker exec $NCT sh -c "curl -sS https://wiki.epochtimesnw.com/ -o /dev/nul
 | Q4 | Authentik `groups` scope + Property Mapping 是否可用 | 5.3 / 5.4 role 映射方案 | 🟢 **不再阻塞**:MVP 改用"默认 editor + 手动 admin"方案,groups 推到 Phase 2;mentor 方便时再确认 Phase 2 可行性 |
 | — | Twitter 账号(Vision 写"待建立")| Twitter 分发部分可能推迟到 Phase 2 | 🟡 待 mentor 确认是否 MVP 先只做 WP |
 | **Q5** | 🔴 **Hermes Agent 可用性 spike**(arch review A1)| 整个 Phase 1 plan 能不能跑 | ⏳ Phase 0 必做(Week 1 前 2 天),mentor 协调时间 + 提供 access |
-| **Q6** | 🟡 Authentik `groups` Property Mapping 5 分钟 spike(arch A2)| 5.3 是否可以直接走 group-based | ⏳ mentor 进 Authentik admin → Customisation → Property Mappings,看有没有 `Groups in JWT` 现成 mapping |
-| **Q7** | 🟡 Directus 11 OIDC discovery URL 行为(arch A3)| 5.2 Step 3 配置方案 | ⏳ dev 阶段 spike 验证 `curl <issuer>/.well-known/openid-configuration`,失败的话 fallback 到 per-endpoint 配置 |
+| **Q6** | Authentik `groups` claim 可用性 | 5.3 role mapping 方案 | 🟢 **2026-06-11 自测基本回答**:discovery URL 显示 `claims_supported` 含 groups,MVP 可走 group-based mapping。**Phase 1 首次 OIDC 联调时确认 id_token 真有 groups 数据** |
+| **Q7** | Directus 11 OIDC discovery URL | 5.2 Step 3 配置方案 | 🟢 **2026-06-11 自测已回答**:discovery URL 返回完整 JSON,Directus `OIDC_ISSUER_URL` 单 env var 方案可行 |
 | **Q8** | 🟡 WP 端能否给 post 加 `source_url` meta 字段(arch D4 防线 2)| 4.3.6 防重复发布查重路径 | ⏳ MVP 必须能做,否则 D4 防线 2 不通。WP REST API 支持 meta,但需要 wp-seaeet 的主题 / 插件不冲突 |
+| — | DNS sanity check(arch A4) | 10.0 网络连通验证 | 🟢 **2026-06-11 自测已通过**:n8n container 调公网 URL HTTP 200 |
 
 ---
 
