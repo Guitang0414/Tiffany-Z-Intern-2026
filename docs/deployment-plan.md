@@ -12,7 +12,7 @@
 > - 🟡 **默认假设**: 等 mentor 回复前我采用的默认方案,回复后可能微调
 > - ⏳ **待 mentor 确认**: 没有答案我不能动笔的卡点
 >
-> 当前状态:**第二轮调整 + Authentik 模板填充**(2026-06-11)。除 mentor 已答 3 题外,通过 SSH 进入生产服务器拿到现有 outline service 的真实 OIDC 配置,用作 Directus 集成模板。剩余开放项见 Section 11 / 12,核心待答只剩 `groups` scope 一条。
+> 当前状态:**第三轮调整 — GPT review 整合**(2026-06-11)。基于第二轮 (Authentik 模板填充) 后,GPT review 提出 10 条改进意见,本轮全部 address:DB 独占强化 / lifecycle hooks 部署具体化 / Flow 触发严格化 / role mapping MVP 简化 / 取消自动 schema apply / 取消自动 n8n import / 加跨 service 网络 smoke test / 澄清 WP draft vs publish / 补 idempotency 细节 / MVP scope 收敛。剩余开放项见 Section 11。
 
 ---
 
@@ -30,12 +30,17 @@
 2. **不破坏现有服务**:新增独立 service,不修改 authentik / wp-seaeet / n8n-with-postgres 等已存在配置
 3. **SSO 优先,但接受例外**:能接 Authentik 的接(Directus 支持 OIDC),不能接的接受现状(n8n free 版无 OIDC)
 4. **dev / prod 分离**:不混用,避免污染生产 WP
+5. **🔴 Directus 独占业务 DB**:
+   - Directus 拥有 `articles` / `categories` 等业务 schema 和 CRUD 权限
+   - **Hermes Agent / n8n / 未来 NestJS 都不允许直连 Directus 的 Postgres**
+   - 所有访问 articles / categories / users 的操作走 **Directus REST API**(读、写、改、查)
+   - 这点跟 HLD 的 "PostgreSQL 只 Directus 直接管 schema / CRUD" 一致,**MVP 严格执行**
 
 ### 1.3 关键事实(调研结论)
 
 | 事实 | 状态 | 说明 |
 |---|---|---|
-| 部署平台是 Hetzner VPS + Dokploy | 🟢 | per CLAUDE.md + 现场观察 |
+| 部署平台是 **OVH VPS + Dokploy** | 🟢 | 2026-06-11 SSH 进 `ovh-prod-eet` 确认(IP `51.81.203.38`,Ubuntu 24.04.4 LTS)。⚠️ CLAUDE.md 写的 Hetzner 5.78.203.102 已过时 |
 | 反代是 Traefik(`dokploy-network`)| 🟢 | 现有 service compose 都引用此 network |
 | HTTPS 由 Dokploy + Let's Encrypt 自动管理 | 🟢 | 现有 service 配置一致 |
 | 域名 pattern: `<service>.epochtimesnw.com` | 🟢 | wiki/n8n/www/newsletter/newstts 都遵循 |
@@ -44,10 +49,12 @@
 | Mentor 自己的 git repo 是 `Guitang0414/*` | 🟢 | News-scraper / news-gateway 都是 |
 | 内部协议是 HTTP,Traefik 边缘做 HTTPS termination | 🟢 | n8n 用 `N8N_PROTOCOL=http` |
 | 编辑团队用 Telegram 接通知 | 🟢 | HLD 一致,notifuse 是给读者的 newsletter,不冲突 |
-| Authentik 已有 Outpost 能力 | 🟢 | worker 挂了 `docker.sock`,可起 Proxy Outpost |
+| Authentik 已有 Outpost 能力 | 🟢 | worker 挂了 `docker.sock`,可起 Proxy Outpost(MVP 不用,Phase 2 给 n8n 选项)|
+| Tailscale tailnet `axiuguitang@gmail.com` 是公司内网 | 🟢 | 加入后可 SSH 到 `ovh-prod-eet`|
 
 ⚠️ **HLD 跟实际不符的地方,本文档以实际为准:**
-- HLD 写 "shared DB" → 实际是每个 service 自带 PG。本 plan 按"自带"写。
+- HLD 写 "shared DB" → 实际是每个 service 自带 PG。**本 plan 按"自带"写**。
+- 仍坚持 HLD 的 "Directus 独占业务 DB" 原则(见 1.2 设计原则 5):**Hermes Agent / n8n 不直连 Directus 的 PG**,全部走 Directus REST API。
 
 ---
 
@@ -236,9 +243,70 @@ networks:
 
 🟡 **MVP 用 local volume**,跟现有 outline / wp / notifuse 等一致。Phase 2 视存储增长再考虑 S3 / R2。
 
+#### 4.1.7 Lifecycle Hooks 部署 / 版本 / 测试
+
+**HLD Section 5 列了一组关键 hooks,本节定具体怎么落地**。
+
+##### Hooks 清单(per HLD)
+
+| Hook | 职责 |
+|---|---|
+| `articles.beforeCreate` | (1) 规范化 `source_url`;(2) 初始化 `final_title = ai_title` / `final_content = ai_content` / `final_summary = ai_summary`(一次性 INSERT 不要 afterCreate) |
+| `articles.beforeUpdate` | **仅当 `status` 字段本身变化时**(`if oldRecord.status !== newRecord.status`)跑下面这些校验:<br>(a) 状态转移合法性(只允许 HLD 状态机定义的 transition)<br>(b) `content_type` 非 NULL 当 `status` 转到 `PUBLISHING`(否则返 422)<br>(c) **仅当 editor 把 `PENDING → PUBLISHING`** 时写 `reviewed_by = currentUser.id`;n8n service account 后续 PATCH per-platform 字段时不要覆盖<br>(d) 阻止 `ai_*` 和 `source_*` 字段修改(field permission 兜底)|
+| `articles.afterCreate` | 调 n8n `send-notification` webhook 通知 "新文章入库"(可选) |
+| `articles.afterUpdate` | 如果 status 转到 `REJECTED` / `PUBLISHED` / `FAILED`,调 n8n `send-notification`(可选,或者用 Directus Flow 替代,见 4.1.8)|
+
+##### 打包 / 版本控制
+
+```
+ai-news-cms/   ← git repo
+├── docker-compose.yml
+├── extensions/                ← Directus extensions(本项目用 hooks 类型)
+│   └── hooks/
+│       └── articles-hooks/
+│           ├── package.json
+│           ├── src/
+│           │   ├── before-create.ts
+│           │   ├── before-update.ts
+│           │   └── after-events.ts
+│           └── dist/          ← build 后产物
+└── snapshots/                 ← Directus schema 快照(见 6.3)
+    └── 20260610-init.yaml
+```
+
+- Hook 代码用 **TypeScript** 写(Directus 标准),提交进 git,**build 产物也提交**(简化 Dokploy build)
+- Compose 里挂 `extensions/` 到 `/directus/extensions/`(已在 4.1.3 草稿里有)
+- Directus 启动时自动扫描 `/directus/extensions/` 加载
+
+##### 测试策略(MVP)
+
+| 测试 | 方式 |
+|---|---|
+| **Unit test (hook 逻辑)** | Jest / Vitest 测纯函数(如"`source_url` 规范化"、"状态转移合法性判定")|
+| **Integration test (Directus runtime)** | dev 环境跑端到端:Agent POST → 看 Directus 里 `final_*` 是否被正确填充;手动改 status 看 hook 是否拒绝非法转移 |
+| **Hook 报错处理** | Hook 抛错会阻止当前 CRUD 操作。**MVP 用 try/catch + log,不做 retry**(per HLD)。严重错误用 Directus Activity Log + Telegram 告警 |
+
+#### 4.1.8 Flow 触发器(严格条件)
+
+**关键 Flow:`publish-article`**
+
+| 字段 | 值 |
+|---|---|
+| Trigger | `articles.status` 字段变化 |
+| Condition Filter | `old.status != "PUBLISHING" AND new.status == "PUBLISHING"` |
+| Action | POST webhook 到 n8n `/webhook/news/publish` |
+
+🔴 **为什么 condition 这么严格**:n8n 在 publish 过程中会回 PATCH `wp_status` / `tweet_status` / `status` 等字段。**如果 Flow trigger 只看 "status 是否 PUBLISHING",n8n 把 status 再写一遍 PUBLISHING(即使没真变化)会误触发**。加 `old.status != "PUBLISHING"` 确保**只在状态首次进入 PUBLISHING** 时触发,后续 n8n 回写不会重复触发 publish。
+
+**其他 Flow**(可选,Phase 2):
+- `articles.status → REJECTED` → 触发 send-notification webhook
+- `articles 新创建` → 触发 send-notification webhook(也可以放 afterCreate hook 里,二选一)
+
 ---
 
 ### 4.2 Hermes Agent
+
+> 🔴 **重要约束**:Hermes Agent **不允许直连 Directus 的 Postgres**。所有 articles / categories 操作走 Directus REST API。
 
 #### 4.2.1 角色
 
@@ -308,6 +376,8 @@ networks:
 
 🟢 **mentor 已确认(2026-06-10):复用现有 `n8n-with-postgres`(`n8n.epochtimesnw.com`),不另起实例**。本项目所有 workflow 加进现有 n8n,用命名 / tag 规范隔离。
 
+> 🔴 **重要约束**:n8n workflow **不允许直连 Directus 的 Postgres**(包括 articles / categories 等业务表)。所有读写走 **Directus REST API**(`https://cms.epochtimesnw.com/items/articles`),用 Directus API token 鉴权。n8n 自己内部的 workflow execution data 用现有 `n8n-with-postgres` 的 PG(那是 n8n 自己的存储,跟业务无关)。
+
 #### 4.3.1 职责(per HLD)
 
 - `publish-article` workflow(收 Directus Flow webhook → 发 WP / Twitter)
@@ -345,9 +415,37 @@ networks:
 
 #### 4.3.5 Compose / 部署
 
-🟢 **本项目不新部署 n8n service**。只:
-- 在现有 n8n UI 里 import 我项目的 workflow JSON(从 git repo 导入)
-- 在现有 n8n credentials store 里加我项目的 credentials
+🟢 **本项目不新部署 n8n service**。MVP 工作:
+- 在现有 n8n UI **手动创建 / 编辑** 我项目的 workflow(`news/publish-article` 等)
+- 在现有 n8n credentials store 里**手动添加**我项目的 credentials(`news/directus-api-token` 等)
+- 创建完每个 workflow,**export JSON 提交进 git** 作为备份 + 文档(`ai-news-n8n-workflows/workflows/*.json`)
+- ⚠️ **MVP 不做自动 import**:从 JSON 自动 import 到现有 n8n 涉及 credentials 重新绑定 / 跨实例引用问题,工作量大,容易踩坑。**Phase 2 再做自动化**
+
+#### 4.3.6 Publish workflow Idempotency(per HLD)
+
+n8n 调外站 API 前,**必须先查 Directus 当前文章状态**,避免重复发布:
+
+```
+publish-article workflow 入口:
+  GET https://cms.epochtimesnw.com/items/articles/{id}
+       ↓
+  读 wp_status / tweet_status / content_type
+       ↓
+  按下面规则跳过 / 重发:
+    if wp_status == 'PUBLISHED':  跳过 WP(避免重复发文章到 WP)
+    if tweet_status == 'PUBLISHED': 跳过 Twitter(避免重复推文)
+    if content_type == 'SHORT': 跳过 WP(SHORT 不发 WP)
+    其他:正常发
+```
+
+retry-publish workflow 同样规则:**只重试 FAILED 的平台,PUBLISHED 的跳过**。
+
+**实现要点**:
+- workflow 第一个 node 调 Directus GET 拿当前状态
+- 用 If / Switch node 按状态决定走 ARTICLE / SHORT / skip 分支
+- 永远不假定"PUBLISHING 一定要走完所有发布步骤" —— 因为 retry 时一些步骤已经成功
+
+📌 严格防止 **WordPress 重复发同一篇 + Twitter 重复推同一条**。
 
 ---
 
@@ -414,31 +512,42 @@ DIRECTUS_DEFAULT_ROLE_ID = <Directus 后台创建 editor role 后的 id>
 
 ### 5.3 Group / Role mapping
 
-#### 默认方案(用 `groups` scope)
+#### 🟢 MVP 方案(简化,不依赖 `groups` scope)
 
-🟡 **默认假设可以做**,实施时如果 mentor 拒绝或 Authentik 配置不允许,fallback 到 5.4 替代方案。
+**已观察**:outline 实际只申请 `openid profile email`,**没用 `groups`**。这暗示公司 Authentik 可能还没标配 group claim mapping。MVP **不依赖 groups,避免实施阻塞**:
 
-- 在 Authentik 创建 group:
-  - 🟡 默认 `news-editor`
-  - 🟡 默认 `news-admin`
-- 在 Directus 创建对应 role(`editor` / `admin`)
-- 用 Authentik **Property Mapping** 把 group → Directus role 映射:
-  - `news-editor` group 成员 → Directus `editor` role
-  - `news-admin` group 成员 → Directus `admin` role
-- Directus env 里加 `OIDC_SCOPES=openid profile email groups`(比公司默认多一个 `groups`)
+1. **所有 Authentik SSO 登录的用户,Directus role 默认 = `editor`**
+   - 通过 `AUTH_AUTHENTIK_DEFAULT_ROLE_ID` env 实现
+2. **`admin` role 在 Directus 后台手动指派**
+   - mentor 或现有 admin 进 Data Studio → Users → 把某用户 role 改成 `admin`
+   - 频率很低(只有少数 admin),不构成负担
+3. Directus env `OIDC_SCOPES = openid profile email`(跟 outline 一致,**不改公司默认配置**)
 
-### 5.4 ⏳ 待 mentor 确认:`groups` scope 是否可用
+**为什么这样设计**:
+- 不需要 mentor 在 Authentik 后台加 group Property Mapping → **避免改公司共用配置**
+- 跟现有 service(outline)风格一致 → 降低集成风险
+- 实施零阻塞,**Q4 的答案不影响 MVP 推进**
 
-**已观察**:outline 实际申请的 scope 只有 `openid profile email`,**没用 `groups`**。这有两种可能:
-1. 现有项目都没做 group-based 角色映射(用别的方式区分管理员,比如 email 白名单)
-2. 公司 Authentik 还没配 `groups` scope / Property Mapping
+#### 🟡 Phase 2:升级到 group-based 自动 mapping
 
-需要 mentor 确认:
-- (a) Directus 能不能申请 `groups` scope?Authentik 后台有现成的 Property Mapping for groups 吗?
-- (b) 如果没有,愿意为这个项目加吗?(Authentik 标配的 group claim mapping,工作量很小)
-- (c) 如果不愿意,Directus 用什么方式区分 editor vs admin?
-  - fallback 1:Authentik 不区分,所有 SSO 登录的用户默认 `editor`,需要 admin 权限的找 admin 在 Directus 后台手动改
-  - fallback 2:用 email 白名单 / domain 判断(参考 news-gateway 的 `ADMIN_EMAILS` env)
+当满足下列任一时考虑升级:
+- mentor 在 Authentik 后台加了 group Property Mapping(可能为别的项目)
+- 编辑人数增长,手动指派 admin 变烦
+- 引入第二种角色需要细粒度权限
+
+升级动作(per HLD 原设计):
+- 在 Authentik 创建 group:`news-editor` / `news-admin`
+- Directus env 改 `OIDC_SCOPES = openid profile email groups`
+- 配 Directus OIDC role mapping:某 group → 某 role
+
+### 5.4 ⏳ Phase 2 跟 mentor 确认:groups scope 可行性(不阻塞 MVP)
+
+MVP 已用 5.3 方案绕开 `groups`,**这条不阻塞**。但 Phase 2 升级时想知道:
+
+- (a) Authentik 后台是否有现成的 group Property Mapping?(outline 没用,可能只是没用,不代表不能用)
+- (b) 如果没有,Phase 2 时加一个的工作量大约多少?
+
+mentor 方便时答一下,**不答也没关系**。
 
 📌 **Category 分配(`assigned_categories`)不从 Authentik 同步**,是 Directus 本地 admin 操作,per HLD 5 章节。
 
@@ -480,31 +589,52 @@ Dokploy 拉代码 → docker compose up -d --build → 替换 container
 
 | Service | 部署源 | Autodeploy 触发 | 备注 |
 |---|---|---|---|
-| `cms` (Directus) | git repo 含 `docker-compose.yml`(只有 compose,不 build 代码)| push 到 main | content type / hooks / flows 改了要重新 sync |
+| `cms` (Directus) | git repo 含 `docker-compose.yml` + `extensions/`(已 build 的 hooks)| push 到 main | content type / flow 配置变化需手动 sync(见 6.3)|
 | `hermes-agent` | git repo 含 Dockerfile + 源码 | push 到 main | Dokploy 自动 build image |
-| n8n workflows | git repo 含 `workflows/*.json`(workflow 导出)| 部署时 import 到现有 n8n | 不部署 n8n service,只 import workflow JSON |
+| n8n workflows | git repo 含 `workflows/*.json` 作**备份和文档** | ❌ **不**自动 import | MVP 手动在 n8n UI 创建,见 4.3.5 |
 
-### 6.3 Directus 配置同步
+### 6.3 Directus 配置同步(MVP 手动 apply)
 
-Directus 的 content type / lifecycle hook / flow 配置不是代码,是 Directus 自己存数据库里的 schema。同步策略:
-
-```bash
-# dev 改了 schema 之后
-npx directus schema snapshot ./snapshots/$(date +%Y%m%d).yaml
-
-# git commit + push,Dokploy 重新部署时 entrypoint 跑:
-npx directus schema apply ./snapshots/latest.yaml
-```
-
-🟡 **默认方案**:每个 release 一个 snapshot,提交进 git。Phase 2 可考虑用 Directus 官方的 `extensions` migration 机制。
-
-### 6.4 n8n workflow 同步
+Directus 的 content type / flow 配置不是代码,是 schema(存在 Directus 自己的 DB 里)。MVP 同步策略:
 
 ```bash
-# n8n UI 里改完 workflow 后, export JSON
-# commit 到 git repo 的 workflows/ 目录
-# Dokploy 部署时 import (n8n CLI: n8n import:workflow --input=workflows/)
+# dev 端改了 schema 之后, 本地命令:
+npx directus schema snapshot ./snapshots/$(date +%Y%m%d-<desc>).yaml
+
+# commit 进 git
+git add snapshots/
+git commit -m "schema: <描述变更>"
+git push
+
+# ⚠️ prod 端: 不自动 apply, mentor / 你手动操作
+ssh ubuntu@ovh-prod-eet
+sudo docker exec production-cms-xxx-directus-1 \
+     npx directus schema apply ./snapshots/<latest>.yaml --yes
 ```
+
+🔴 **MVP 不自动 apply 到 prod**:
+- 每次 git push 自动 apply 风险大(schema migration 可能 break 生产数据)
+- 改为**人工触发**:开发改 schema → 出 snapshot 入 git → 手动 SSH 上 prod 跑 apply
+- 流程稳定后(Phase 2)再考虑自动化
+
+🟡 **dev 端可以自动 apply**(Dokploy entrypoint 加一行 `directus schema apply`),因为 dev 数据可弃。
+
+### 6.4 n8n workflow 同步(MVP 手动管理)
+
+🔴 **MVP 不做自动 import**。流程:
+
+```
+1. 开发在现有 n8n UI 里手动创建 / 改 workflow
+2. workflow 改完, n8n UI 点 Export → 下载 JSON
+3. 把 JSON commit 进 git repo (ai-news-n8n-workflows/workflows/*.json)
+   - 作用: 备份 + 文档 + 版本历史, 不用于自动部署
+4. 出问题 / 误删时, 用 git 里的 JSON 在 n8n UI 手动 Import 恢复
+```
+
+**为什么不自动 import**:
+- n8n CLI 的 `import:workflow` 涉及 credentials 重新绑定(每次 import 后 credentials 引用会变),容易踩坑
+- 现有 n8n 是共享实例,自动覆盖其他项目 workflow 风险大
+- Phase 2 可以视稳定性引入自动 import + credentials provider 解耦
 
 🟡 同上,提交 JSON 入 git。
 
@@ -594,24 +724,61 @@ services:
 
 ## 9. Rollout 计划
 
+### 9.0 MVP scope vs Phase 2(明确边界,避免 plan 膨胀)
+
+#### 🟢 MVP 必须做(证明 chain 跑通的最小集)
+
+> 目标:**Agent → Directus → n8n → WP(live 或 draft) → Telegram 通知** 完整跑通
+
+| 项 | MVP 状态 |
+|---|---|
+| Directus 部署 + Authentik SSO(默认 editor + 手动 admin) | ✅ |
+| Hermes Agent 部署 + Claude 改写 + POST 到 Directus | ✅ |
+| n8n 复用现有实例 + 3 个核心 workflow(publish / retry / notify) | ✅ |
+| WordPress 发布到 wp-seaeet(live 默认,draft 仅冒烟测试用) | ✅ |
+| Telegram 通知 | ✅ |
+| Directus lifecycle hooks(beforeCreate / beforeUpdate)| ✅ |
+| Directus Flow 触发 publish workflow(condition 严格 see 4.1.8)| ✅ |
+| n8n idempotency(按 wp_status/tweet_status 跳过已 PUBLISHED 平台,see 4.3.6)| ✅ |
+| dev WP 用本地 container,prod WP 用 wp-seaeet | ✅ |
+| 手动 import n8n workflow / 手动 apply Directus schema 到 prod | ✅ |
+
+#### 🟡 Phase 2 改进(MVP 之后再做)
+
+| 项 | 推到 Phase 2 的原因 |
+|---|---|
+| **Authentik `groups` scope + 自动 role mapping** | outline 没用,公司 Authentik 可能没配,实施风险大;MVP 用"默认 editor + 手动 admin"绕开 |
+| **自动 `directus schema apply` 到 prod** | schema migration 风险大,先人工 apply 稳定流程 |
+| **自动 import n8n workflow JSON** | credentials 重新绑定问题复杂,先手动管理 |
+| **专用 staging WP**(如果开发中发现需要)| MVP 用本地 container 自测够用,需求出现再扩 |
+| **Twitter 集成**(如果 Vision 的 "待建立" 状态延续)| 账号未建则推迟,只做 WordPress |
+| **Monitoring / Logging dashboard(uptime-kuma 接入)** | 可观测性强化 |
+| **定时自动 retry FAILED 文章 / 完整 retry 历史表** | per HLD 也是 Phase 2 |
+| **Categories 多对多 + Agent 自动分类多 category** | MVP 一对一 |
+| **`groups` scope 升级路径 + Outpost forward-auth 给 n8n** | MVP n8n 维持现状 |
+| **Backup / Restore 策略** | MVP 跟现有 service 一致 |
+
 ### 9.1 阶段划分(跟 internship-plan.md Week 7-8 对齐)
 
 ```
 Phase 1: dev 部署 + 联调  (Week 7 上半)
-  - Directus dev 起来
-  - Authentik dev OIDC 接通
+  - Directus dev 起来 + Authentik OIDC 接通
   - Hermes Agent dev 跑通 1 篇文章入库
-  - 现有 n8n 跑通 `news/publish-article` workflow (发 dev WP)
+  - 现有 n8n 跑通 `news/publish-article` workflow (发本地 dev WP)
+  - lifecycle hooks 验证
+  - 跨 service 网络连通验证 (见 10.0)
 
-Phase 2: prod 部署 + 真发布测试  (Week 7 下半)
-  - prod Directus + n8n + Agent 全起来
-  - Authentik prod OIDC 接通
-  - 用 1 篇真新闻走完全链路,发 prod WP draft 状态人工审
+Phase 2: prod 部署 + 冒烟测试  (Week 7 下半)
+  - prod 端 Directus + Agent 部署
+  - 跑 1 篇真新闻全链路, workflow 临时切到 WP draft 避免污染生产
+  - 测完恢复 workflow 默认 live publish
+  - schema apply 到 prod (手动 SSH 上去跑)
 
 Phase 3: 切量上线  (Week 8)
-  - 编辑账号在 Authentik 创建 + group 配置
-  - category 初始化 + 编辑 assignment
-  - Agent cron 真启动 (n8n 触发, 每 10 min 抓一次)
+  - 编辑账号:Authentik 已有就直接登; 没账号的 mentor 给开
+  - 首批编辑首登后, 手动指派一名 admin
+  - category 初始化 + 给编辑分 assigned_categories
+  - Agent cron 真启动 (n8n 触发, 频率按需配)
   - 监控 + 告警接通 Telegram
 ```
 
@@ -625,28 +792,82 @@ Phase 3: 切量上线  (Week 8)
 
 ## 10. 验证 / Smoke Test
 
-每个 phase 结束时跑下面这些验证:
+每个 phase 结束时跑下面这些验证。
 
-### 10.1 Phase 1 验收
+### 10.0 部署前必跑:跨 service 网络连通
 
+🔴 **重要前提**:Hermes Agent 在自己的 compose project,n8n 在另一个 compose project(`production-n8nwithpostgres-*`),它们能不能通过 service 名互相找到,取决于 Dokploy 的 `dokploy-network` 行为。**MVP 部署前必须验证**:
+
+```bash
+# 在 ovh-prod-eet 上:
+
+# (a) 找现有 n8n 容器
+sudo docker ps --filter "name=n8n" --format "{{.Names}}"
+
+# (b) 进去测试能不能 ping / curl Hermes Agent (假设 Hermes 已部署)
+sudo docker exec <n8n-container> sh -c "curl -sS http://hermes-agent:8090/health"
+
+# 预期: 返回 200 / OK
+# 如果 connection refused / could not resolve:
+#   → 跨 project 在 dokploy-network 上不能解析 service 名
+#   → 需要给 Hermes Agent compose 加 network alias:
+#         services:
+#           hermes-agent:
+#             networks:
+#               dokploy-network:
+#                 aliases:
+#                   - hermes-agent
+#   → 或用 Hermes Agent container 的内部 IP(查 `docker inspect`)
+#   → 或暴露一个内网 domain(通过 Traefik 但不开公网)
+```
+
+📌 **如果验证失败**,plan 里 Section 4.2 / 4.3 关于 n8n → Hermes Agent 的访问方式需要调整。
+
+### 10.1 Phase 1 验收(dev 环境联调)
+
+**部署验证**:
 - [ ] `https://cms-dev.epochtimesnw.com` 能打开 Directus Data Studio
-- [ ] 点 Login 跳转到 Authentik,登录后跳回 Directus 且能进 admin UI
-- [ ] Authentik 里 `news-editor` group 成员登录后,role 是 `editor`
-- [ ] Hermes Agent 容器内 curl Directus `/items/categories` 200 返回
+- [ ] 点 Login 跳转到 Authentik,登录后跳回 Directus 且能进 Data Studio
+- [ ] **新 SSO 用户首次登录后,Directus 里 role 默认是 `editor`**(per MVP 默认方案 5.3)
+- [ ] **manual 升级 admin**:在 Directus 后台手动把某用户 role 改成 `admin`,该用户重新登录后能看到 admin 工具栏
+
+**Agent → Directus**:
+- [ ] Hermes Agent 容器内 `curl -H "Authorization: Bearer <token>" cms-dev.epochtimesnw.com/items/categories` 200 返回
 - [ ] Agent 跑一轮:抓 1 篇文章 → 调 Claude 改写 → POST 到 Directus → 在 Data Studio 看见
-- [ ] 现有 n8n 收到 Directus Flow webhook(`/webhook/news/publish`)时触发 `news/publish-article` workflow
-- [ ] workflow 发 dev WP 成功,Directus 里 `wp_status=PUBLISHED`
+- [ ] 文章 `final_*` 字段已被 `beforeCreate` hook 初始化(等于 `ai_*`)
 
-### 10.2 Phase 2 验收
+**n8n → Directus / WP**:
+- [ ] Directus Flow 在 `status: PENDING → PUBLISHING` 时触发(改成别的字段不触发)
+- [ ] 现有 n8n 收到 `/webhook/news/publish` 时触发 `news/publish-article` workflow
+- [ ] workflow 先 GET Directus 查 wp_status/tweet_status 后才发(idempotency,见 4.3.6)
+- [ ] **workflow 发 dev WP 成功,WP 文章状态 = `publish`**(MVP 默认 live publish,不是 draft)
+- [ ] Directus 里 `wp_status=PUBLISHED, wp_post_id, wp_url, wp_published_at` 全部回写
 
-- 同上,但所有都对 prod 端点
-- 测试文章在 wp-seaeet 上以 draft 状态出现,人工删除
+**Lifecycle hooks**:
+- [ ] beforeCreate hook 跑过(看 Directus log 有"final_* initialized from ai_*"记录)
+- [ ] beforeUpdate hook 拒绝非法状态转移(如 `PENDING → PUBLISHED` 直跳应该返 422)
+- [ ] reviewed_by 字段只在 editor 改 `PENDING → PUBLISHING` 那次被写
 
-### 10.3 Phase 3 验收
+### 10.2 Phase 2 验收(prod 环境冒烟测试)
 
-- editor 真审过 1 篇文章,正常发布到 prod
-- 发布失败(模拟 Twitter 故障)时,Telegram 收到告警
-- retry 能成功重发失败的平台
+**重要约束**:这一步在生产 wp-seaeet 上测,需要确保**不污染生产**。
+
+- [ ] 跑 1 篇真新闻全链路,但 workflow 临时改成发 **WP draft** 状态(不是 publish)—— 见下方说明
+- [ ] 测试文章在 wp-seaeet 后台以 draft 出现,**编辑 / mentor 确认后手动删**
+- [ ] 整个链路(Agent → Directus → n8n → WP draft → Telegram)所有日志正常
+- [ ] 切回 workflow 默认行为(`status: publish`),准备 Phase 3
+
+📌 **关于 WP draft vs publish**(澄清 HLD 跟本节的差别):
+- **HLD 生产 workflow 默认**:`WORDPRESS publish` API 调用时 `status=publish`(文章立即上线)
+- **本 phase 2 冒烟测试**:**临时**改 workflow 用 `status=draft`,**只为了不污染生产**,测完恢复
+- 如果 mentor 想长期用 "AI 生成 → 编辑 Directus 审 → 发 WP 也先 draft → 再人工 publish" 的双重审核流程,**这是 HLD 没明确说的产品决定,要专门讨论**,不是 plan 默认
+
+### 10.3 Phase 3 验收(真实上线)
+
+- [ ] editor 真审过 1 篇文章,流程: 在 Directus 审核 → 点 Publish → 文章 live 出现在 epochtimesnw.com
+- [ ] 发布失败(模拟 Twitter 故障 / WP API down)时,Directus 里 status=FAILED + `*_error` 写入 + Telegram 收到告警
+- [ ] retry workflow 能跳过已 PUBLISHED 的平台,只重发 FAILED 的(idempotency 验证)
+- [ ] 重复入库:Agent 抓到同一 source_url 第二次,Directus 返 422 conflict,Agent 静默跳过
 
 ---
 
@@ -658,7 +879,7 @@ Phase 3: 切量上线  (Week 8)
 | Q2 | n8n 复用还是新建 + 接入方式 | 4.3 n8n 部署方案 | ✅ mentor 答(2026-06-10):**复用现有 n8n,不接 SSO** |
 | Q3 续 | dev / staging WP 怎么办 | 7.2 dev WP 方案 | 🟡 mentor 部分答(确认 prod=wp-seaeet),dev 用本地 container 默认推进 |
 | — | Authentik 后台访问权限 | 5 Authentik 集成细节 | 🟡 web admin 因 "external user" 进不去,**已通过 SSH + docker exec 拿到现有配置作模板**(2026-06-11)。仍待 mentor 升 internal 方便后续维护 |
-| Q4 | Authentik `groups` scope + Property Mapping 是否可用 | 5.3 / 5.4 role 映射方案 | ⏳ 待问 mentor(outline 没用 groups,不确定是技术不支持还是其他原因)|
+| Q4 | Authentik `groups` scope + Property Mapping 是否可用 | 5.3 / 5.4 role 映射方案 | 🟢 **不再阻塞**:MVP 改用"默认 editor + 手动 admin"方案(per GPT review 建议),groups 推到 Phase 2;mentor 方便时再确认 Phase 2 可行性 |
 | — | Twitter 账号(Vision 写"待建立")| Twitter 分发部分可能推迟到 Phase 2 | 🟡 待 mentor 确认是否 MVP 先只做 WP |
 
 ---
