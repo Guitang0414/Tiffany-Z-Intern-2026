@@ -12,12 +12,13 @@
 > - 🟡 **默认假设**: 等 mentor 回复前我采用的默认方案,回复后可能微调
 > - ⏳ **待 mentor 确认**: 没有答案我不能动笔的卡点
 >
-> 当前状态:**第五轮调整 — Self-tests 验证 + Authentik discovery URL 收获**(2026-06-11 晚)。
-> - Self-Test 1(arch A4 DNS sanity check)✅ 通过 → 10.0 标已验证
-> - Self-Test 2(arch A3 Authentik discovery URL)✅ 通过,**并发现 `claims_supported` 含 groups,意味着 MVP 可走 group-based mapping 不用 fallback**
-> - 5.0 / 5.3 / 5.4 / 10.0 / 11 都基于新发现更新
+> 当前状态:**第六轮调整 — 3rd-pass GPT review 选择性整合**(2026-06-11 晚)。第 3 轮 GPT review 提了 6 块挑战,筛掉 2 块过度规划(代码组织 / 排版),整合 4 块真实 gap:
+> - PE1 字段权限矩阵(新 4.1.9)→ Hook 不再做静态字段保护,主防线是 Directus 原生 field permission
+> - PE3 MVP 无 extension 操作路径(新 4.1.10)→ 编辑直接在 Data Studio 改字段,零自定义 button
+> - PE4 `categories.wp_category_id` 字段(4.3.6 schema 补)→ 解 WP category mapping gap
+> - PE5 Slug-based dedup fallback(4.3.6 防线 2 备选)→ Q8 答否也有路径,降低 mentor 阻塞
 > 
-> 剩余 mentor escalations 缩减到 **2 个**:Q5(Hermes spike) + Q8(WP source_url meta)。其他能自测的都自测完了。
+> Q8 现在**有 fallback 不再硬阻塞**,只剩 Q5(Hermes spike)是真硬阻塞。
 
 ---
 
@@ -341,6 +342,43 @@ ai-news-cms/   ← git repo
 
 🔴 **规则(arch review H2)**:外部 service 调用一律走 Flow,不走 Hook。Flow 失败有 Directus 内置重试 + 可见性;Hook 失败会阻塞 CRUD 操作。
 
+#### 4.1.9 字段权限矩阵(主防线)
+
+3rd-pass review PE1:`source_*` / `ai_*` 字段保护**主要靠 Directus role 的 field permission**,不靠 hook 拦截。Hook 现在专注做"动态业务逻辑"(状态机 / 用户上下文),静态字段权限交给 Directus 原生 RBAC。
+
+| 字段族 | editor | admin | service_account(Agent / n8n)| 说明 |
+|---|---|---|---|---|
+| `source_url` / `source_title` / `source_content` / `source_site` / `source_published_at` | read | read | **write**(Agent POST 时填) | Immutable after create |
+| `ai_title` / `ai_content` / `ai_summary` | read | read | **write**(Agent POST 时填) | Immutable after create |
+| `final_title` / `final_content` / `final_summary` | **write** | write | read | 编辑改的字段 |
+| `status` | conditional write(beforeUpdate guard 控制合法 transition)| write | write | actor-aware 转移规则见 4.1.7 |
+| `content_type` | **write**(必填 before PUBLISHING)| write | — | 编辑选 ARTICLE / SHORT |
+| `rejection_reason` | **write**(when REJECT)| write | — | 编辑驳回时填 |
+| `reviewed_by` | **read only(hook 自动写)** | read only(hook 自动写) | read only(hook 自动写,且 service account PATCH 主动 strip)| 只有 hook 能写 |
+| `wp_*` / `tweet_*` / `published_at` | read | read | **write** | n8n publish 后回写 |
+| `category_id` | read | write(admin 可改归类)| **write**(Agent POST 时填)| — |
+| `manual_intervention_required` | read | write(admin 重置)| **write**(writeback 失败时 alert hook 写)| 4.3.6 防线 1 用 |
+
+**实施**:Directus 11 后台 → Settings → Roles → 各 role 点开 → 对 `articles` collection 按上表配 field permission。Hook 里**不再做静态字段保护**,只做动态业务逻辑(状态机 / reviewed_by / actor-aware)。
+
+#### 4.1.10 MVP 编辑操作路径(无自定义 extension)
+
+3rd-pass review PE3:MVP 阶段编辑不需要自定义 Publish / Reject / Retry button —— Data Studio 直接改字段就行,hook + Flow 配合搞定。**自定义 button 是 Phase 2 UX 改进,不是 MVP 功能需求**。
+
+| 动作 | 编辑在 Data Studio 怎么做 | 后端发生什么 |
+|---|---|---|
+| **Publish** | 1. 打开文章<br>2. 改 `content_type` 字段(选 ARTICLE / SHORT)<br>3. 改 `status` 字段:PENDING → PUBLISHING<br>4. Save | hook(beforeUpdate)校验 content_type 非 NULL + 状态转移合法 + 写 `reviewed_by` → Flow 触发(condition `old.status != PUBLISHING AND new.status == PUBLISHING`)→ n8n webhook |
+| **Reject** | 1. 改 `rejection_reason` 字段填原因<br>2. 改 `status`:PENDING → REJECTED<br>3. Save | hook 校验合法 → Flow 触发 → n8n send-notification |
+| **Retry**(admin)| 1. 改 `status`:FAILED → PUBLISHING<br>2. Save | hook 校验是 admin 触发 → Flow 触发 → n8n retry-publish workflow(走 4.3.6 idempotency)|
+| **Save 草稿**(编辑改 final_* 但不 publish)| 1. 改 `final_*` 字段<br>2. Save(status 保持 PENDING)| Directus Revisions 自动记录历史 |
+
+**好处**:
+- 零自定义 extension 代码 → 实施工作量降低
+- 全程靠 Directus 原生 RBAC + hook + Flow → 跟公司其他 service 风格一致
+- Phase 2 加自定义 button 时,**底层 hook / Flow 逻辑不用动**(只是 UX 包装)
+
+**前提**:Directus Data Studio 必须给 editor role 显示 `status` field 的下拉框可编辑 + 提供合法 enum 值。这是 4.1.9 字段权限矩阵已覆盖。
+
 ---
 
 ### 4.2 Hermes Agent
@@ -574,9 +612,11 @@ WP POST 成功 →
       防止任何 workflow 自动碰这条
 ```
 
-**防线 2:WP 端 source_url 查重(MVP 第一道关键防御)**
+**防线 2:WP 端查重 — 主选 source_url meta,fallback slug-based**
 
-WP publish 前,n8n 先查 WP 是否已有同 source_url 的文章。Directus 状态不可信的时候,**WP 自己是 source of truth**:
+WP publish 前,n8n 先查 WP 是否已有同 source_url 的文章。Directus 状态不可信的时候,**WP 自己是 source of truth**。
+
+**主选方案:source_url 存 post meta**
 
 ```
 publish to WP 前:
@@ -586,21 +626,59 @@ publish to WP 前:
     跳过 POST, 把已存在的 wp_post_id 回写 Directus
     log "skip_publish: already exists in WP"
   else:
-    正常 POST
+    正常 POST (POST body 里 meta.source_url = <url>)
     回写 Directus (适用防线 1)
 ```
 
-**前提**:WP publish 时把 `source_url` 存 post meta(WP REST API 支持 `meta` 字段)。**这个改动 MVP 必须做**,否则查重无解。
+**前提**:wp-seaeet 的主题 / 插件支持 REST API meta_key 查询(标准 WP 默认 disabled,需要 plugin 注册 meta `show_in_rest`)。**Q8 待 mentor 答复**。
 
-##### Schema 新增字段(arch review D4)
+**Fallback 方案(3rd-pass review PE5):Slug-based dedup**
 
-加 1 个字段到 articles collection:
+如果 Q8 答否,改用 deterministic slug:
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `manual_intervention_required` | BOOLEAN, default false | writeback 永久失败时 hook 写 true,任何 workflow 看到 true 跳过自动处理,只 admin 手动恢复 |
+```
+publish to WP 前:
+  slug = sha256(source_url).slice(0, 32)
+  POST https://www.epochtimesnw.com/wp-json/wp/v2/posts
+       body: { title, content, slug: <slug>, ... }
+       ↓
+  if WP 返 409 (slug 冲突):
+    GET /posts?slug=<slug> → 拿已存在的 post.id
+    回写 Directus
+  if WP 自动加 -2 后缀 (不返 409):
+    Plan 这条 fallback 也不通, 退到 "维护本地 source_url → wp_post_id 查重表"
+    (额外 schema 复杂度, Phase 2 决策)
+```
 
-⚠️ HLD schema 没有这个字段,这是 plan 这里加的。**回头 HLD 应同步更新**。
+⚠️ **dedup 路径决定**:Q8 答 yes → 主选,**Q8 答 no → fallback 启用 + 跑 T2 spike 验证 slug 行为**。
+
+##### Schema 新增字段(arch review D4 + 3rd-pass PE4)
+
+加 2 个字段:
+
+| Collection | 字段 | 类型 | 说明 |
+|---|---|---|---|
+| `articles` | `manual_intervention_required` | BOOLEAN, default false | writeback 永久失败时 hook 写 true,任何 workflow 看到 true 跳过自动处理,只 admin 手动恢复 |
+| `categories` | `wp_category_id` | INTEGER, NULLABLE | WP 端对应 category 的内部 id。admin 在 Directus 建 category 时手动填(WP admin 后台查得到)。**n8n publish workflow 读这个值发到 WP `categories` 字段**,NULL 时 fallback 到 WP `Uncategorized` (id=1) |
+
+⚠️ HLD schema 没有这两个字段,这是 plan 这里加的。**回头 HLD 应同步更新**。
+
+##### Category 解析(n8n publish workflow,3rd-pass review PE4)
+
+n8n publish workflow 调 WP `POST /wp-json/wp/v2/posts` 时,`categories` 字段必填:
+
+```
+WP publish 前:
+  article.category_id → GET cms.../items/categories/{id}?fields=wp_category_id
+       ↓
+  if wp_category_id is not null:
+    POST WP with categories: [<wp_category_id>]
+  else:
+    POST WP with categories: [1]   # WP Uncategorized 的默认 id
+    log "warning: category <category.name> has no wp_category_id, using Uncategorized"
+```
+
+**好处**:admin 全程在 Directus UI 内维护 category → WP id 的映射,不用改 n8n workflow 代码,也不用单独建 mapping collection。
 
 #### 4.3.7 Watchdog workflow:防卡死(arch review C1)
 
@@ -1068,7 +1146,7 @@ sudo docker exec $NCT sh -c "wget --spider -S https://wiki.epochtimesnw.com/ 2>&
 | **Q5** | 🔴 **Hermes Agent 可用性 spike**(arch review A1)| 整个 Phase 1 plan 能不能跑 | ⏳ Phase 0 必做(Week 1 前 2 天),mentor 协调时间 + 提供 access |
 | **Q6** | Authentik `groups` claim 可用性 | 5.3 role mapping 方案 | 🟢 **2026-06-11 自测基本回答**:discovery URL 显示 `claims_supported` 含 groups,MVP 可走 group-based mapping。**Phase 1 首次 OIDC 联调时确认 id_token 真有 groups 数据** |
 | **Q7** | Directus 11 OIDC discovery URL | 5.2 Step 3 配置方案 | 🟢 **2026-06-11 自测已回答**:discovery URL 返回完整 JSON,Directus `OIDC_ISSUER_URL` 单 env var 方案可行 |
-| **Q8** | 🟡 WP 端能否给 post 加 `source_url` meta 字段(arch D4 防线 2)| 4.3.6 防重复发布查重路径 | ⏳ MVP 必须能做,否则 D4 防线 2 不通。WP REST API 支持 meta,但需要 wp-seaeet 的主题 / 插件不冲突 |
+| **Q8** | 🟡 WP 端能否给 post 加 `source_url` meta 字段(arch D4 防线 2)| 4.3.6 防重复发布查重路径 | ⏳ **有 fallback 不阻塞**:主选 source_url meta;mentor 答否则用 PE5 slug-based dedup(需跑 T2 spike 验证 WP 是否对重复 slug 返 409)|
 | — | DNS sanity check(arch A4) | 10.0 网络连通验证 | 🟢 **2026-06-11 自测已通过**:n8n container 调公网 URL HTTP 200 |
 
 ---
