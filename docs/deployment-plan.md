@@ -12,7 +12,7 @@
 > - 🟡 **默认假设**: 等 mentor 回复前我采用的默认方案,回复后可能微调
 > - ⏳ **待 mentor 确认**: 没有答案我不能动笔的卡点
 >
-> 当前状态:**mentor 回复后第一轮调整**(2026-06-10)。3 个核心问题已 close 2 个(Q1/Q2),Q3 续部分 close。剩余开放项见 Section 11 / 12。
+> 当前状态:**第二轮调整 + Authentik 模板填充**(2026-06-11)。除 mentor 已答 3 题外,通过 SSH 进入生产服务器拿到现有 outline service 的真实 OIDC 配置,用作 Directus 集成模板。剩余开放项见 Section 11 / 12,核心待答只剩 `groups` scope 一条。
 
 ---
 
@@ -161,7 +161,7 @@ services:
       AUTH_AUTHENTIK_IDENTIFIER_KEY: email
       AUTH_AUTHENTIK_ALLOW_PUBLIC_REGISTRATION: 'false'
       AUTH_AUTHENTIK_DEFAULT_ROLE_ID: ${DIRECTUS_DEFAULT_ROLE_ID}
-      AUTH_AUTHENTIK_SCOPE: 'openid email profile groups'
+      AUTH_AUTHENTIK_SCOPE: 'openid profile email'  # ⏳ 是否加 groups 待 mentor,见 5.4
       
       # --- File Storage (local volume) ---
       STORAGE_LOCATIONS: local
@@ -225,7 +225,7 @@ networks:
 | `POSTGRES_DB` | PG 数据库名 | 取 `directus` |
 | `OIDC_CLIENT_ID` | Authentik OIDC client id | Authentik 后台生成 |
 | `OIDC_CLIENT_SECRET` | Authentik OIDC client secret | Authentik 后台生成 |
-| `OIDC_ISSUER_URL` | Authentik issuer URL | 形如 `https://<authentik-domain>/application/o/<app-slug>/` |
+| `OIDC_ISSUER_URL` | Authentik issuer URL | `https://auth.epochtimesnw.com/application/o/directus-cms/` |
 | `DIRECTUS_DEFAULT_ROLE_ID` | 首次登录用户的默认 role id | Directus 后台创建 `editor` role 后复制 id |
 
 #### 4.1.6 Volumes
@@ -353,7 +353,21 @@ networks:
 
 ## 5. Authentik SSO 集成
 
-🟢 **mentor 已确认(2026-06-10):Tiffany 用 Tailscale 已可访问 Authentik 后台**,看现有 OIDC Provider 配置作为模板。本节具体字段值待截图调研后补全(Tiffany 待办)。
+🟢 **2026-06-11:通过 SSH 进入生产服务器(`ovh-prod-eet`),从现有 outline 服务的 container env 中读到了真实 OIDC 配置作为模板**。本节基于这些真实值给 Directus 集成定方案。
+
+### 5.0 公司 Authentik 集成 pattern(从 outline 反推)
+
+| 维度 | 实际值 |
+|---|---|
+| Authentik 公网 URL | `https://auth.epochtimesnw.com` |
+| OIDC issuer base | `https://auth.epochtimesnw.com/application/o/` |
+| 每个 application 的 issuer | `https://auth.epochtimesnw.com/application/o/<slug>/` (例: outline 的是 `.../o/outline/`) |
+| Tenant-global endpoints | `/application/o/authorize/` / `/token/` / `/userinfo/` |
+| Per-app endpoint | `/application/o/<slug>/end-session/` |
+| outline 实际申请 scopes | `openid profile email` ⚠️ **没申请 `groups`** |
+| Username claim | `email` |
+| Display name (SSO 按钮) | `Authentik` |
+| Client ID 格式 | 40 字符随机串(Authentik 自动生成)|
 
 ### 5.1 集成范围
 
@@ -368,25 +382,41 @@ networks:
 
 #### Step 1:创建 OIDC Provider
 
-在 Authentik 后台:
+在 Authentik 后台(`https://auth.epochtimesnw.com/if/admin/`):
 - Provider 类型:**OAuth2 / OpenID Provider**
-- 命名:🟡 默认 `directus-oidc`(跟 news-gateway 等命名风格对齐)
+- 命名:🟡 默认 `directus-cms-oidc`
 - Client type:**Confidential**(Directus 有 backend,可以保管 client_secret)
 - Client ID / Client Secret:Authentik 自动生成(填到 Dokploy env)
-- Redirect URIs:`https://cms.epochtimesnw.com/auth/login/authentik/callback`
-- Signing Key:用默认 / 公司常用的那把
-- Scopes:`openid email profile groups`
-
-> ⏳ **redirect URI 路径以 Directus 11 实际 callback URL 为准**,实施时查 Directus 文档确认。
+- **Redirect URIs**:`https://cms.epochtimesnw.com/auth/login/authentik/callback`
+  > ⚠️ 实际路径以 Directus 11 的 OIDC callback 为准,实施时查 Directus 文档确认。Directus 一般是 `/auth/login/<provider-name>/callback`,跟 outline 用的 `<URL>/auth/oidc.callback` 不同。
+- Signing Key:用现有 service(outline)同款 key,跟公司惯例对齐
+- **Scopes**:`openid profile email`(跟 outline 一致)+ ⏳ **是否加 `groups`?见 5.4**
 
 #### Step 2:创建 Application
 
 - 命名:🟡 默认 `Directus CMS`
-- Slug:`directus-cms`
+- **Slug:`directus-cms`** —— 决定 issuer URL = `https://auth.epochtimesnw.com/application/o/directus-cms/`
 - Provider:绑定上面创建的 OIDC Provider
 - Launch URL:`https://cms.epochtimesnw.com`
 
-#### Step 3:配置 Group / Role mapping
+#### Step 3:Directus 端的 env vars
+
+填入 Dokploy → cms service → Environment tab:
+
+```
+OIDC_CLIENT_ID         = <Authentik Step 1 自动生成的 client_id>
+OIDC_CLIENT_SECRET     = <Authentik Step 1 自动生成的 client_secret>
+OIDC_ISSUER_URL        = https://auth.epochtimesnw.com/application/o/directus-cms/
+DIRECTUS_DEFAULT_ROLE_ID = <Directus 后台创建 editor role 后的 id>
+```
+
+💡 **用 issuer URL 而不是逐个 endpoint URL**:Directus 支持 OIDC discovery,只要给 issuer URL,会自动从 `<issuer>/.well-known/openid-configuration` 拿到所有 endpoint。比 outline 用的"每个 endpoint 一个 env"省事得多。
+
+### 5.3 Group / Role mapping
+
+#### 默认方案(用 `groups` scope)
+
+🟡 **默认假设可以做**,实施时如果 mentor 拒绝或 Authentik 配置不允许,fallback 到 5.4 替代方案。
 
 - 在 Authentik 创建 group:
   - 🟡 默认 `news-editor`
@@ -395,24 +425,41 @@ networks:
 - 用 Authentik **Property Mapping** 把 group → Directus role 映射:
   - `news-editor` group 成员 → Directus `editor` role
   - `news-admin` group 成员 → Directus `admin` role
+- Directus env 里加 `OIDC_SCOPES=openid profile email groups`(比公司默认多一个 `groups`)
 
-> 📌 **Category 分配(`assigned_categories`)不从 Authentik 同步**,是 Directus 本地 admin 操作,per HLD 5 章节。
+### 5.4 ⏳ 待 mentor 确认:`groups` scope 是否可用
 
-### 5.3 SSO 登录流程(走通后的样子)
+**已观察**:outline 实际申请的 scope 只有 `openid profile email`,**没用 `groups`**。这有两种可能:
+1. 现有项目都没做 group-based 角色映射(用别的方式区分管理员,比如 email 白名单)
+2. 公司 Authentik 还没配 `groups` scope / Property Mapping
+
+需要 mentor 确认:
+- (a) Directus 能不能申请 `groups` scope?Authentik 后台有现成的 Property Mapping for groups 吗?
+- (b) 如果没有,愿意为这个项目加吗?(Authentik 标配的 group claim mapping,工作量很小)
+- (c) 如果不愿意,Directus 用什么方式区分 editor vs admin?
+  - fallback 1:Authentik 不区分,所有 SSO 登录的用户默认 `editor`,需要 admin 权限的找 admin 在 Directus 后台手动改
+  - fallback 2:用 email 白名单 / domain 判断(参考 news-gateway 的 `ADMIN_EMAILS` env)
+
+📌 **Category 分配(`assigned_categories`)不从 Authentik 同步**,是 Directus 本地 admin 操作,per HLD 5 章节。
+
+### 5.5 SSO 登录流程(走通后的样子)
 
 ```
 编辑在浏览器访问 https://cms.epochtimesnw.com
    ↓ Directus 检测未登录
-   ↓ 跳转到 https://<authentik-domain>/.../o/authorize/?client_id=...
+   ↓ 跳转到 https://auth.epochtimesnw.com/application/o/authorize/?client_id=<id>&...
 编辑输入 Authentik 账号 + MFA
    ↓ Authentik 验证通过
-   ↓ 跳回 cms.epochtimesnw.com/auth/login/authentik/callback?code=xxx
-Directus 后端拿 code POST 到 Authentik /token endpoint
+   ↓ 跳回 https://cms.epochtimesnw.com/auth/login/authentik/callback?code=xxx
+Directus 后端拿 code POST 到 https://auth.epochtimesnw.com/application/o/token/
    ↓ 拿到 access_token + id_token
-Directus 解析 id_token 拿 email / groups 等 claims
-   ↓ 首次登录时按 group 创建 directus_users 记录, 写入对应 role
+Directus GET https://auth.epochtimesnw.com/application/o/userinfo/  
+   ↓ 拿到 email / profile / (groups 待确认) 等 claims
+   ↓ 首次登录时按 email/group 创建 directus_users 记录, 写入对应 role
    ↓ 设置 Directus session cookie
 编辑进入 Data Studio, 看自己 category 下的 PENDING 文章
+
+(登出时浏览器调 https://auth.epochtimesnw.com/application/o/directus-cms/end-session/)
 ```
 
 ---
@@ -610,16 +657,18 @@ Phase 3: 切量上线  (Week 8)
 | Q1 | News-scraper / news-gateway 跟项目什么关系 | 9.2 处置方案 | ✅ mentor 答(2026-06-10):**无关,忽略** |
 | Q2 | n8n 复用还是新建 + 接入方式 | 4.3 n8n 部署方案 | ✅ mentor 答(2026-06-10):**复用现有 n8n,不接 SSO** |
 | Q3 续 | dev / staging WP 怎么办 | 7.2 dev WP 方案 | 🟡 mentor 部分答(确认 prod=wp-seaeet),dev 用本地 container 默认推进 |
-| — | Authentik 后台访问权限 | 5 Authentik 集成细节 | ✅ mentor 确认(2026-06-10):Tailscale 已可看,Tiffany 调研中 |
+| — | Authentik 后台访问权限 | 5 Authentik 集成细节 | 🟡 web admin 因 "external user" 进不去,**已通过 SSH + docker exec 拿到现有配置作模板**(2026-06-11)。仍待 mentor 升 internal 方便后续维护 |
+| Q4 | Authentik `groups` scope + Property Mapping 是否可用 | 5.3 / 5.4 role 映射方案 | ⏳ 待问 mentor(outline 没用 groups,不确定是技术不支持还是其他原因)|
 | — | Twitter 账号(Vision 写"待建立")| Twitter 分发部分可能推迟到 Phase 2 | 🟡 待 mentor 确认是否 MVP 先只做 WP |
 
 ---
 
 ## 12. 待补全(后续迭代)
 
-mentor 答完核心 3 个问题后,剩下要做的:
+mentor 答完核心 3 个问题 + SSH 调研之后,剩下要做的:
 
-- [ ] **Section 5 — Authentik OIDC Provider 配置具体字段值**(Tiffany 看 Authentik 后台截图后,Claude 补全 redirect URI / scope / property mapping / signing key 等具体值)
+- [x] ~~Section 5 — Authentik OIDC pattern~~(2026-06-11 通过 SSH 拿到 outline 实际 OIDC 配置,推断 Directus 集成方案,见 5.0-5.5)
+- [ ] **Section 5.4 — 跟 mentor 确认 `groups` scope 是否可用**(决定 role 映射走 group 还是 fallback)
 - [ ] **Section 4.3 — n8n workflow 实际命名 list**(动手时填入具体 workflow 名 / tag / credential 名)
 - [x] ~~Section 9.2 — News-scraper 处置~~(已 close:无关)
 - [x] ~~Section 4.3 — n8n 复用/新建~~(已 close:复用)
