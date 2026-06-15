@@ -1,0 +1,25 @@
+{
+  "name": "directus-extension-articles-hooks",
+  "version": "0.1.0",
+  "description": "Directus lifecycle hooks for the articles collection (url normalization, final_*=ai_* init, actor-aware state machine, reviewed_by guard).",
+  "type": "module",
+  "private": true,
+  "directus:extension": {
+    "type": "hook",
+    "path": "dist/index.js",
+    "source": "src/index.ts",
+    "host": "^11.0.0"
+  },
+  "scripts": {
+    "build": "directus-extension build",
+    "dev": "directus-extension build -w --no-minify",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@directus/extensions-sdk": "^13.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.9"
+  }
+}
