@@ -10,12 +10,22 @@
 // state machine + reviewed_by handling.
 
 import { defineHook } from '@directus/extensions-sdk';
-import { normalizeSourceUrl } from './lib/normalize-url';
+import { createError } from '@directus/errors';
+import { normalizeSourceUrl, InvalidUrlError } from './lib/normalize-url';
 import { isStatus, type Status } from './lib/status';
 import { isTransitionAllowed, isHumanApproval } from './lib/state-machine';
 import { resolveActor, parseServiceRoleIds } from './lib/actor';
 
 const SERVICE_ROLE_IDS = parseServiceRoleIds(process.env.ARTICLES_SERVICE_ROLE_IDS);
+
+// These are *validation* failures (bad client input), so they must surface as 4xx,
+// not 500. The Agent's retry logic treats 5xx as transient (retry 3x) and 4xx/422
+// as a permanent data error (don't retry) — returning 500 here would cause useless
+// retries. deployment-plan §4.1.7 / Agent error-handling table.
+function fail(message: string, status = 422): never {
+  const Err = createError('ARTICLE_VALIDATION_FAILED', message, status);
+  throw new Err();
+}
 
 export default defineHook(({ filter }) => {
   // ---- beforeCreate: normalize url + seed final_* from ai_* in one INSERT ----
@@ -23,7 +33,12 @@ export default defineHook(({ filter }) => {
     const payload = input as Record<string, unknown>;
 
     if (typeof payload.source_url === 'string') {
-      payload.source_url = normalizeSourceUrl(payload.source_url);
+      try {
+        payload.source_url = normalizeSourceUrl(payload.source_url);
+      } catch (err) {
+        if (err instanceof InvalidUrlError) fail(`Invalid source_url: ${payload.source_url}`, 400);
+        throw err;
+      }
     }
 
     // final_* defaults to ai_* so editors open a pre-filled draft (hld.md §字段族).
@@ -50,7 +65,7 @@ export default defineHook(({ filter }) => {
 
     const newStatus = payload.status as string;
     if (!isStatus(newStatus)) {
-      throw new Error(`Invalid status value: ${JSON.stringify(newStatus)}`);
+      fail(`Invalid status value: ${JSON.stringify(newStatus)}`, 400);
     }
 
     // Load current rows to know the source state + content_type.
@@ -61,22 +76,20 @@ export default defineHook(({ filter }) => {
       const from = row.status as Status;
       if (from === newStatus) continue; // status unchanged for this row -> no guard
 
-      if (!isTransitionAllowed(from, newStatus, actor)) {
-        throw new Error(
-          `Illegal status transition ${from} -> ${newStatus} for actor "${actor}" (article ${row.id})`
-        );
+      if (!isTransitionAllowed(from, newStatus as Status, actor)) {
+        fail(`Illegal status transition ${from} -> ${newStatus} for actor "${actor}" (article ${row.id})`);
       }
 
       // content_type must be set before an article can enter PUBLISHING.
       if (newStatus === 'PUBLISHING') {
         const effectiveType = (payload.content_type as string | null | undefined) ?? row.content_type;
         if (effectiveType == null) {
-          throw new Error(`content_type is required before publishing (article ${row.id})`);
+          fail(`content_type is required before publishing (article ${row.id})`);
         }
       }
 
       // Record the human reviewer exactly once, on approval.
-      if (isHumanApproval(from, newStatus, actor) && context.accountability?.user) {
+      if (isHumanApproval(from, newStatus as Status, actor) && context.accountability?.user) {
         payload.reviewed_by = context.accountability.user;
       }
     }

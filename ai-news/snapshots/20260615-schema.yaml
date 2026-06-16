@@ -1178,14 +1178,16 @@ fields:
     meta:
       collection: articles
       conditions: null
-      display: null
-      display_options: null
+      display: related-values
+      display_options:
+        template: '{{name}}'
       field: category_id
       group: null
       hidden: false
-      interface: null
+      interface: select-dropdown-m2o
       note: null
-      options: null
+      options:
+        template: '{{name}}'
       readonly: false
       required: false
       searchable: true
