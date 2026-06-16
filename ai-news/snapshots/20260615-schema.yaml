@@ -50,6 +50,30 @@ collections:
       versioning: false
     schema:
       name: categories
+  - collection: users_categories
+    meta:
+      accountability: all
+      archive_app_filter: true
+      archive_field: null
+      archive_value: null
+      collapse: open
+      collection: users_categories
+      color: null
+      display_template: null
+      group: null
+      hidden: true
+      icon: import_export
+      item_duplication_fields: null
+      note: null
+      preview_url: null
+      singleton: false
+      sort: null
+      sort_field: null
+      translations: null
+      unarchive_value: null
+      versioning: false
+    schema:
+      name: users_categories
 fields:
   - collection: articles
     field: id
@@ -1554,6 +1578,150 @@ fields:
       has_auto_increment: false
       foreign_key_table: null
       foreign_key_column: null
+  - collection: directus_users
+    field: assigned_categories
+    type: alias
+    meta:
+      collection: directus_users
+      conditions: null
+      display: null
+      display_options: null
+      field: assigned_categories
+      group: null
+      hidden: false
+      interface: list-m2m
+      note: editor 被分配的 category
+      options: {}
+      readonly: false
+      required: false
+      searchable: true
+      sort: 1
+      special:
+        - m2m
+      translations: null
+      validation: null
+      validation_message: null
+      width: full
+  - collection: users_categories
+    field: id
+    type: integer
+    meta:
+      collection: users_categories
+      conditions: null
+      display: null
+      display_options: null
+      field: id
+      group: null
+      hidden: true
+      interface: null
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 1
+      special: null
+      translations: null
+      validation: null
+      validation_message: null
+      width: full
+    schema:
+      name: id
+      table: users_categories
+      data_type: integer
+      default_value: nextval('users_categories_id_seq'::regclass)
+      max_length: null
+      numeric_precision: 32
+      numeric_scale: 0
+      is_nullable: false
+      is_unique: true
+      is_indexed: false
+      is_primary_key: true
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: true
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: users_categories
+    field: directus_users_id
+    type: uuid
+    meta:
+      collection: users_categories
+      conditions: null
+      display: null
+      display_options: null
+      field: directus_users_id
+      group: null
+      hidden: true
+      interface: null
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 2
+      special: null
+      translations: null
+      validation: null
+      validation_message: null
+      width: full
+    schema:
+      name: directus_users_id
+      table: users_categories
+      data_type: uuid
+      default_value: null
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: directus_users
+      foreign_key_column: id
+  - collection: users_categories
+    field: categories_id
+    type: uuid
+    meta:
+      collection: users_categories
+      conditions: null
+      display: null
+      display_options: null
+      field: categories_id
+      group: null
+      hidden: true
+      interface: null
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 3
+      special: null
+      translations: null
+      validation: null
+      validation_message: null
+      width: full
+    schema:
+      name: categories_id
+      table: users_categories
+      data_type: uuid
+      default_value: null
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: categories
+      foreign_key_column: id
 systemFields:
   - collection: directus_activity
     field: timestamp
@@ -1610,3 +1778,45 @@ relations:
       constraint_name: articles_reviewed_by_foreign
       on_update: NO ACTION
       on_delete: SET NULL
+  - collection: users_categories
+    field: directus_users_id
+    related_collection: directus_users
+    meta:
+      junction_field: categories_id
+      many_collection: users_categories
+      many_field: directus_users_id
+      one_allowed_collections: null
+      one_collection: directus_users
+      one_collection_field: null
+      one_deselect_action: nullify
+      one_field: assigned_categories
+      sort_field: null
+    schema:
+      table: users_categories
+      column: directus_users_id
+      foreign_key_table: directus_users
+      foreign_key_column: id
+      constraint_name: users_categories_directus_users_id_foreign
+      on_update: NO ACTION
+      on_delete: CASCADE
+  - collection: users_categories
+    field: categories_id
+    related_collection: categories
+    meta:
+      junction_field: directus_users_id
+      many_collection: users_categories
+      many_field: categories_id
+      one_allowed_collections: null
+      one_collection: categories
+      one_collection_field: null
+      one_deselect_action: nullify
+      one_field: null
+      sort_field: null
+    schema:
+      table: users_categories
+      column: categories_id
+      foreign_key_table: categories
+      foreign_key_column: id
+      constraint_name: users_categories_categories_id_foreign
+      on_update: NO ACTION
+      on_delete: CASCADE
