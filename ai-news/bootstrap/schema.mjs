@@ -156,7 +156,14 @@ async function run() {
   await ensureCollection('categories', { icon: 'category', note: '文章话题分类 (admin 维护)' });
   await ensureField('categories', f.string('name', { len: 50, nullable: false, unique: true }));
   await ensureField('categories', f.text('description'));
-  await ensureField('categories', f.json('keywords')); // Agent 关键词预筛
+  // keywords: JSON string array, edited via the "tags" interface (admin-friendly,
+  // no raw JSON typing). Interface confirmed in Data Studio + captured in snapshot.
+  await ensureField('categories', {
+    field: 'keywords',
+    type: 'json',
+    schema: { is_nullable: true },
+    meta: { interface: 'tags', note: 'Agent 关键词预筛' },
+  });
   await ensureField('categories', f.integer('wp_category_id')); // deployment-plan §4.3.6 / PE4
   await ensureField('categories', f.dateCreated());
   await ensureField('categories', f.dateUpdated());

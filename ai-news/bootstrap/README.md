@@ -41,5 +41,24 @@ Directus 11 ties these to roles/policies and they're safer to verify in the UI:
 Once the schema looks right in dev, capture a versioned snapshot to commit:
 
 ```bash
-npx directus schema snapshot ./snapshots/$(date +%Y%m%d)-init.yaml
+# Export the full live schema (incl. Data Studio changes like interfaces) from the container:
+docker exec ai-news-directus-1 npx directus schema snapshot --yes /tmp/snapshot.yaml
+docker cp ai-news-directus-1:/tmp/snapshot.yaml ../snapshots/$(date +%Y%m%d)-schema.yaml
 ```
+
+### ⚠️ Source of truth: snapshot, not this script
+
+`schema.mjs` is a **one-shot bootstrap** that creates collections/fields if missing — it is
+idempotent by *existence*, so it will NOT re-apply edits made in Data Studio (e.g. changing
+an interface) to an instance that already has the field.
+
+Once you start configuring in Data Studio, the committed **snapshot YAML** (`ai-news/snapshots/`)
+becomes the source of truth. To reproduce the schema on a fresh instance (or Dokploy):
+
+```bash
+docker cp ../snapshots/<date>-schema.yaml ai-news-directus-1:/tmp/snapshot.yaml
+docker exec ai-news-directus-1 npx directus schema apply --yes /tmp/snapshot.yaml
+```
+
+`schema.mjs` is kept in sync as a convenience for brand-new empty instances, but if the two
+ever disagree, **the snapshot wins**.
