@@ -38,16 +38,16 @@ review / 部署到 Dokploy 前对着勾;每条要求都注明**出处**(来自 H
 
 ## C. Hooks(`articles.beforeCreate` / `beforeUpdate`)
 
-- [ ] `✅ 单测` 清洗 `source_url` 的 5 条规则(lowercase host / 强制 https / 去 fragment / 去 utm_·fbclid·gclid·ref_·aff_ / 去尾斜杠)— deployment-plan §4.3.6 C2
+- [x] `✅ 单测+真机` 清洗 `source_url` 的 5 条规则(lowercase host / 强制 https / 去 fragment / 去 utm_·fbclid·gclid·ref_·aff_ / 去尾斜杠)— deployment-plan §4.3.6 C2 — *真机:带 utm 的同篇 url 被去重拦下(Value has to be unique)*
   - 验:`npm test`(normalize-url.test.ts)+ 真机塞带 `?utm_source=x` 的同一篇,应只进一篇
-- [ ] `🟡 待真机` 进库时 `final_* = ai_*`(beforeCreate 一次性写入)— HLD §Lifecycle Hooks
-  - 验:真机 POST 一篇,看 `final_title/final_content/final_summary` 是否自动 = `ai_*`
+- [x] `✅ 已验` 进库时 `final_* = ai_*`(beforeCreate 一次性写入)— HLD §Lifecycle Hooks
+  - 验:真机 POST 一篇,`final_title` 自动 = `ai_title`(AI改写标题)✓
 - [ ] `🟡 待真机` 状态守卫**仅在 `status` 字段真的变化时**才触发 — deployment-plan §4.1.7
   - 验:用 service token PATCH 只改 `wp_status`(不动 status)应不报错;非法 status 跳转应报错
-- [ ] `✅ 单测` actor-aware 合法转移表 == deployment-plan §4.1.7(editor / admin / service 各自能做的转移)
-  - 验:`npm test`(state-machine.test.ts)
-- [ ] `🟡 待真机` 转 `PUBLISHING` 前 `content_type` 必须非空,缺失返 422 — HLD + §4.1.7(a)
-  - 验:真机不选 content_type 直接发布,应被拒
+- [x] `✅ 单测+真机` actor-aware 合法转移表 == deployment-plan §4.1.7(editor / admin / service 各自能做的转移)
+  - 验:`npm test` + 真机 admin 试 PENDING→PUBLISHED 被拒(422, ARTICLE_VALIDATION_FAILED)。editor/service 身份待 #1 角色后补验
+- [x] `✅ 已验(422)` 转 `PUBLISHING` 前 `content_type` 必须非空,缺失返 422 — HLD + §4.1.7(a)
+  - 验:真机不选 content_type 直接发布 → 返 **422**(修复前是 500,review 抓出并已修)
 - [ ] `🟡 待真机` `reviewed_by` 仅人工审核(PENDING→PUBLISHING)时写;service account PATCH 携带 `reviewed_by` 被 strip — §4.1.7(b)(c)
   - 验:真机:编辑审核通过后 `reviewed_by` = 该编辑;之后 n8n(service)PATCH 不应改动它
 - [ ] `⭐ 待拍板` `reviewed_by` 是否也记 **admin** 审核(文档字面只写 editor,我扩到了 admin)
@@ -59,11 +59,11 @@ review / 部署到 Dokploy 前对着勾;每条要求都注明**出处**(来自 H
 
 这些是 🟡 条目的真机验法,拦住=对,没拦=抓到 bug:
 
-1. 用 **editor** 身份把文章从 `PENDING` 直接改成 `PUBLISHED` → **应被拒**(必经 PUBLISHING)
-2. 不选 `content_type` 就把文章改成 `PUBLISHING` → **应返 422**
-3. 同一 `source_url`(一个带 `?utm_source=x` 一个不带)塞两次 → **应只进一篇**
-4. 用 **service** token 把文章从 `PENDING` 改 `PUBLISHING`(机器不能审核)→ **应被拒**
-5. 新建一篇文章后查 `final_*` → **应自动等于 `ai_*`**
+1. [x] `PENDING` 直接改 `PUBLISHED` → **被拒**(422)✓ *(以 admin 验;editor 身份待 #1 角色)*
+2. [x] 不选 `content_type` 改 `PUBLISHING` → **返 422**(content_type required)✓
+3. [x] 同一 `source_url`(带/不带 `utm_source`)→ **被去重拦**(Value has to be unique)✓
+4. [ ] 用 **service** token 从 `PENDING` 改 `PUBLISHING` → 应被拒 — **待 #1 建 service 角色后验**
+5. [x] 新建文章后 `final_*` **自动 = `ai_*`** ✓
 
 ---
 
