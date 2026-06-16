@@ -72,3 +72,11 @@ review / 部署到 Dokploy 前对着勾;每条要求都注明**出处**(来自 H
 - `✅` 逻辑层:跑 `npm test` 自己确认绿
 - `🟡` 真机层:**你**起本地 Directus 亲手验(我不能替你宣布达标 —— 我写的我说对,等于自评)
 - `⭐` 决策层:**你 / mentor** 拍板
+
+---
+
+## ⭐ 待 mentor 确认的决策(开放项)
+
+- [ ] **`reviewed_by` 是否也记 admin 审核**(代码现扩到了 admin,文档字面只写 editor)
+- [ ] **两个补充字段** `articles.manual_intervention_required` / `categories.wp_category_id`(deploy §4.3.6 加的,HLD ER 图没有)是否保留
+- [ ] **正式分类 taxonomy** —— 现在 `categories` 里只有一条**测试数据 `Politics`**(description 已标注"测试数据,待确认")。正式要哪些分类(Politics / Medical / Finance / AI …?)+ 各自 keywords,待 mentor 确认后重建。**注意:分类是数据、不进 snapshot**,确认后需手动录入。
