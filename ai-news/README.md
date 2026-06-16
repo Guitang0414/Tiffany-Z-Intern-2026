@@ -17,7 +17,7 @@ ai-news/
 ├── docker-compose.yml        # local dev: Directus(:8055) + Postgres
 ├── .env.example              # copy to .env
 ├── extensions/
-│   └── hooks/articles-hooks/ # lifecycle hooks (TS) + unit tests
+│   └── articles-hooks/       # lifecycle hooks (TS) + unit tests (Directus 11 layout: directly under extensions/)
 └── bootstrap/
     └── schema.mjs            # creates collections/fields/relations/roles via REST API
 ```
@@ -36,7 +36,7 @@ docker compose up -d
 Directus loads the **built** extension from `extensions/`, so build before (or after) `up`:
 
 ```bash
-cd extensions/hooks/articles-hooks
+cd extensions/articles-hooks
 npm install
 npm run build                 # produces dist/index.js
 docker compose restart directus   # (from ai-news/) pick up the built hook
@@ -48,7 +48,7 @@ The decision logic (url normalization, state machine, actor resolution) is pure 
 in isolation — `npm test` does not require a running Directus or DB:
 
 ```bash
-cd extensions/hooks/articles-hooks
+cd extensions/articles-hooks
 npm install
 npm test                      # 28 tests
 ```
