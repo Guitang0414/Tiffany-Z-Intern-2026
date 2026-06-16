@@ -36,6 +36,10 @@ services:
 
       CACHE_ENABLED: "true"
       CACHE_STORE: memory
+      # Auto-purge cache on schema/data mutations so dev schema changes
+      # (e.g. running bootstrap/schema.mjs) show up immediately instead of
+      # being hidden by a stale /collections cache.
+      CACHE_AUTO_PURGE: "true"
 
       # Dev convenience: reload extensions on rebuild
       EXTENSIONS_AUTO_RELOAD: "true"
