@@ -698,15 +698,17 @@ fields:
     meta:
       collection: articles
       conditions: null
-      display: null
-      display_options: null
+      display: related-values
+      display_options:
+        template: '{{email}}'
       field: reviewed_by
       group: null
       hidden: false
-      interface: null
+      interface: select-dropdown-m2o
       note: null
-      options: null
-      readonly: false
+      options:
+        template: '{{email}}'
+      readonly: true
       required: false
       searchable: true
       sort: 16
