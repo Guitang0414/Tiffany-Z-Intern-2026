@@ -244,9 +244,34 @@ async function run() {
     schema: { on_delete: 'SET NULL' },
   });
 
+  // === field interfaces (idempotent PATCH — applies on fresh AND existing instances) ===
+  // Relational FK fields default to a raw UUID input. Give them the M2O picker + readable
+  // labels so editors choose a category by NAME (not by pasting a UUID), and reviewed_by
+  // shows the reviewer's email. Done as PATCH (not at create) so re-running this also fixes
+  // instances that were bootstrapped before these were added. Kept in sync with the snapshot.
+  await api('PATCH', '/fields/articles/category_id', {
+    meta: {
+      interface: 'select-dropdown-m2o',
+      options: { template: '{{name}}' },
+      display: 'related-values',
+      display_options: { template: '{{name}}' },
+      translations: [{ language: 'en-US', translation: 'Category' }],
+    },
+  });
+  console.log('  ~ articles.category_id -> M2O dropdown ("Category")');
+  await api('PATCH', '/fields/articles/reviewed_by', {
+    meta: {
+      interface: 'select-dropdown-m2o',
+      options: { template: '{{email}}' },
+      display: 'related-values',
+      display_options: { template: '{{email}}' },
+      readonly: true,
+    },
+  });
+  console.log('  ~ articles.reviewed_by -> M2O email, read-only');
+
   console.log('\n✓ schema bootstrap complete');
-  console.log('Next (Data Studio): add directus_users.assigned_categories (M2M -> categories),');
-  console.log('then roles + field permissions per deployment-plan §4.1.9.');
+  console.log('Next: node add-m2m.mjs (assigned_categories) then node permissions.mjs (roles + §4.1.9).');
 }
 
 run().catch((e) => {
