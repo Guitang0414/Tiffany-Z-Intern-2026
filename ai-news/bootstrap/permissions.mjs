@@ -82,23 +82,31 @@ async function run() {
   await perm(service.policyId, 'articles', 'read', ['*']);
   await perm(service.policyId, 'categories', 'read', ['*']);
 
-  // --- test users ---
-  // DEV-ONLY test users + static token (for local verification). On prod you create
-  // real editor accounts via Authentik SSO and issue the Agent/n8n token as a secret.
-  const editorUser = await api('POST', '/users', {
-    email: 'editor@example.com', password: 'editor123', role: editor.roleId,
-    first_name: 'Test', last_name: 'Editor',
-  });
-  if (politics) {
-    await api('PATCH', `/users/${editorUser.id}`, { assigned_categories: [{ categories_id: politics.id }] });
-  }
-  console.log(`+ test editor user editor@test.local / editor123 (assigned: ${politics ? 'Politics' : 'none'})`);
+  // --- test users (DEV / LOCALHOST ONLY) ---
+  // These have known/public credentials (editor123, plus a static token committed to this
+  // repo), so they are ONLY seeded against a local instance. Never create them on a remote /
+  // public instance — anyone reading the repo could use the token to write. On a real
+  // deployment you create editor accounts via Authentik SSO and issue the Agent/n8n token as
+  // a real secret. (We had to manually delete these from the public cms-dev deploy.)
+  const isLocal = /\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(URL_BASE);
+  if (isLocal) {
+    const editorUser = await api('POST', '/users', {
+      email: 'editor@example.com', password: 'editor123', role: editor.roleId,
+      first_name: 'Test', last_name: 'Editor',
+    });
+    if (politics) {
+      await api('PATCH', `/users/${editorUser.id}`, { assigned_categories: [{ categories_id: politics.id }] });
+    }
+    console.log(`+ test editor user editor@example.com / editor123 (assigned: ${politics ? 'Politics' : 'none'})`);
 
-  await api('POST', '/users', {
-    email: 'agent@example.com', role: service.roleId, token: 'svc-static-token-123',
-    first_name: 'Agent', last_name: 'Service',
-  });
-  console.log('+ service user agent@svc.local (static token: svc-static-token-123)');
+    await api('POST', '/users', {
+      email: 'agent@example.com', role: service.roleId, token: 'svc-static-token-123',
+      first_name: 'Agent', last_name: 'Service',
+    });
+    console.log('+ service user agent@example.com (static token: svc-static-token-123)');
+  } else {
+    console.log('= skipped DEV test users (non-local DIRECTUS_URL) — create real accounts + a real Agent/n8n token instead');
+  }
 
   console.log('\n✓ permissions bootstrap complete');
   console.log(`\n>>> SERVICE ROLE ID (put in ARTICLES_SERVICE_ROLE_IDS): ${service.roleId}`);
