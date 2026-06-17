@@ -1,0 +1,73 @@
+# ai-news — LOCAL DEV compose (Directus + Postgres).
+#
+# This is the dev-only variant: ports exposed on localhost, local admin login,
+# extensions mounted from source with auto-reload. It is intentionally NOT the
+# production compose (prod uses dokploy-network, no exposed ports, Authentik OIDC,
+# pinned patch versions — see docs/deployment-plan.md §4.1.3).
+#
+# Per deployment-plan: Directus owns the business DB. Hermes Agent / n8n never
+# touch this Postgres directly — they go through the Directus REST API.
+
+services:
+  directus:
+    image: directus/directus:11   # pinned to 11.x per mentor decision (v12 GA — revisit later)
+    restart: unless-stopped
+    ports:
+      - "8055:8055"               # DEV ONLY — prod has no exposed port (Traefik fronts it)
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KEY: ${DIRECTUS_KEY}
+      SECRET: ${DIRECTUS_SECRET}
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8055}
+
+      # Local admin login (dev). Prod replaces this with Authentik OIDC.
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+
+      # Self-contained Postgres
+      DB_CLIENT: pg
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_DATABASE: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+
+      CACHE_ENABLED: "true"
+      CACHE_STORE: memory
+      # Auto-purge cache on schema/data mutations so dev schema changes
+      # (e.g. running bootstrap/schema.mjs) show up immediately instead of
+      # being hidden by a stale /collections cache.
+      CACHE_AUTO_PURGE: "true"
+
+      # Dev convenience: reload extensions on rebuild
+      EXTENSIONS_AUTO_RELOAD: "true"
+
+      LOG_LEVEL: info
+
+      # Service-account role IDs consumed by the articles hooks (see .env.example)
+      ARTICLES_SERVICE_ROLE_IDS: ${ARTICLES_SERVICE_ROLE_IDS:-}
+    volumes:
+      - directus_uploads:/directus/uploads
+      - ./extensions:/directus/extensions
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - directus_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  directus_uploads:
+  directus_pg_data:
