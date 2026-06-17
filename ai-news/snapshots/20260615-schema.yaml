@@ -1193,7 +1193,9 @@ fields:
       searchable: true
       sort: 28
       special: null
-      translations: null
+      translations:
+        - language: en-US
+          translation: Category
       validation: null
       validation_message: null
       width: full

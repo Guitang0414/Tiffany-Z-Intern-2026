@@ -62,8 +62,20 @@ review / 部署到 Dokploy 前对着勾;每条要求都注明**出处**(来自 H
 1. [x] `PENDING` 直接改 `PUBLISHED` → **被拒**(422)✓ *(以 admin 验;editor 身份待 #1 角色)*
 2. [x] 不选 `content_type` 改 `PUBLISHING` → **返 422**(content_type required)✓
 3. [x] 同一 `source_url`(带/不带 `utm_source`)→ **被去重拦**(Value has to be unique)✓
-4. [ ] 用 **service** token 从 `PENDING` 改 `PUBLISHING` → 应被拒 — **待 #1 建 service 角色后验**
+4. [x] 用 **service** token 从 `PENDING` 改 `PUBLISHING` → **被拒**(422, actor "service")✓
 5. [x] 新建文章后 `final_*` **自动 = `ai_*`** ✓
+
+---
+
+## D. 角色 + 字段权限(§4.1.9)— `permissions.mjs`
+
+> snapshot **不含**权限;`permissions.mjs` 是权限的 source of truth(详见 bootstrap/README)。
+
+- [x] `✅ 已验` **immutable**:editor 改 `ai_title` → **403**;改 `final_title` → 200
+- [x] `✅ 已验` **service actor**:service token 做 `PENDING→PUBLISHING` → **422**(机器不能审核);service 建文章(source/ai)→ 200
+- [x] `✅ 已配` `ARTICLES_SERVICE_ROLE_IDS` = service role id(否则 hook 把机器当 editor)
+- [ ] `🟡 待 UI 验` editor 登录 Data Studio:`ai_*`/`source_*` 只读、只看到自己 category 的文章
+- [ ] `🟡 待验` `reviewed_by`:editor 审核通过(PENDING→PUBLISHING)后 = 该 editor;之后 service 回写不覆盖
 
 ---
 

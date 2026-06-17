@@ -25,16 +25,22 @@ Node 18+ (uses built-in `fetch`). No npm install needed.
   `category_id`, timestamps
 - relations: `articles.category_id → categories`, `articles.reviewed_by → directus_users`
 
-## Done in Data Studio afterwards (not scripted)
+## The other two bootstrap scripts (run after schema.mjs)
 
-Directus 11 ties these to roles/policies and they're safer to verify in the UI:
+```bash
+node add-m2m.mjs       # directus_users.assigned_categories M2M -> categories
+node permissions.mjs   # editor/service roles + field/item permissions (§4.1.9)
+                       # prints the SERVICE role id -> put it in ARTICLES_SERVICE_ROLE_IDS, then recreate directus
+```
 
-1. **`directus_users.assigned_categories`** — M2M field → `categories`. Admin drags the
-   categories each editor owns. Item-level permission uses this to scope what editors see.
-2. **Roles + field permissions** per deployment-plan §4.1.9:
-   - `editor` role: write `final_*` / `content_type` / `rejection_reason`; read-only `source_*` / `ai_*` / `wp_*` / `tweet_*` / `reviewed_by`; conditional `status`.
-   - `service` role (Agent + n8n token): write `source_*` / `ai_*` / `category_id` / `wp_*` / `tweet_*`; **after** creating it, put its role id into `ARTICLES_SERVICE_ROLE_IDS` so the hooks treat it as a machine actor.
-3. **Disable** Directus' built-in draft/published archive on `articles` (we use the custom `status`).
+- `add-m2m.mjs` — adds the M2M so editors can be assigned categories.
+- `permissions.mjs` — creates:
+  - `editor` role: write `final_*` / `content_type` / `rejection_reason`; **read-only** `source_*` / `ai_*` / `wp_*` / `tweet_*` / `reviewed_by` (this is what makes them immutable); item-level read/update scoped to `category ∈ assigned_categories`.
+  - `service` role (Agent + n8n): create `source_*` / `ai_*` / `category_id`; write back `wp_*` / `tweet_*` / `status`.
+  - DEV-ONLY test users: `editor@example.com` / `editor123` (assigned Politics) and `agent@example.com` (static token `svc-static-token-123`).
+  - **After running, set `ARTICLES_SERVICE_ROLE_IDS` = the printed service role id and recreate directus**, else the hooks treat the Agent/n8n token as an editor and block its writebacks.
+
+> ⚠️ **`directus schema snapshot` does NOT capture roles / policies / permissions / users** — those live in `directus_*` data tables, not the schema. So **`permissions.mjs` is the source of truth for access control** (re-run it on a fresh instance), the same way the snapshot is for the schema. On a fresh instance: `schema apply` (snapshot) → `add-m2m.mjs` → `permissions.mjs`.
 
 ## Schema snapshot (recommended, per deployment-plan §6.3)
 
