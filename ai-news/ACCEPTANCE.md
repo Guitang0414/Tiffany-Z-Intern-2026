@@ -75,7 +75,8 @@ review / 部署到 Dokploy 前对着勾;每条要求都注明**出处**(来自 H
 - [x] `✅ 已验` **service actor**:service token 做 `PENDING→PUBLISHING` → **422**(机器不能审核);service 建文章(source/ai)→ 200
 - [x] `✅ 已配` `ARTICLES_SERVICE_ROLE_IDS` = service role id(否则 hook 把机器当 editor)
 - [ ] `🟡 待 UI 验` editor 登录 Data Studio:`ai_*`/`source_*` 只读、只看到自己 category 的文章
-- [ ] `🟡 待验` `reviewed_by`:editor 审核通过(PENDING→PUBLISHING)后 = 该 editor;之后 service 回写不覆盖
+- [x] `✅ 已验` `reviewed_by`:editor 审核通过(PENDING→PUBLISHING)后 = **editor@example.com** ✓
+  - 🐛 review 抓出:hook 加 `reviewed_by` 撞 editor 字段权限 → 403,editor 原本审核不了。已修(reviewed_by 加进 editor 可写,hook 仍控制其值)
 
 ---
 

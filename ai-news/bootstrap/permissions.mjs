@@ -30,8 +30,12 @@ async function api(method, path, body) {
   return json.data;
 }
 
-// editor may only WRITE these on articles (everything else read-only => source_*/ai_* immutable)
-const EDITOR_WRITE = ['final_title', 'final_content', 'final_summary', 'content_type', 'status', 'rejection_reason'];
+// editor may only WRITE these on articles (everything else read-only => source_*/ai_* immutable).
+// reviewed_by is included ONLY because the beforeUpdate hook adds it to the payload on
+// approval (PENDING->PUBLISHING) — without write perm the hook-augmented payload 403s.
+// It's safe: the hook strips any client-supplied reviewed_by and sets the value itself,
+// so editors still can't forge it. (Keep it UI-readonly so editors don't try to edit it.)
+const EDITOR_WRITE = ['final_title', 'final_content', 'final_summary', 'content_type', 'status', 'rejection_reason', 'reviewed_by'];
 // service (Agent) creates with these
 const SERVICE_CREATE = ['source_url','source_title','source_content','source_site','source_published_at','ai_title','ai_content','ai_summary','final_title','final_content','final_summary','category_id'];
 // service (n8n) writes back these
