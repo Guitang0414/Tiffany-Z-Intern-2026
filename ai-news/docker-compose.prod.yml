@@ -42,16 +42,18 @@ services:
 
       LOG_LEVEL: info
 
-      # --- Authentik OIDC (Phase 2) — uncomment + fill once mentor provides the app ---
-      # AUTH_PROVIDERS: authentik
-      # AUTH_AUTHENTIK_DRIVER: openid
-      # AUTH_AUTHENTIK_CLIENT_ID: ${OIDC_CLIENT_ID}
-      # AUTH_AUTHENTIK_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
-      # AUTH_AUTHENTIK_ISSUER_URL: ${OIDC_ISSUER_URL} # https://auth.epochtimesnw.com/application/o/directus-cms/
-      # AUTH_AUTHENTIK_IDENTIFIER_KEY: email
-      # AUTH_AUTHENTIK_ALLOW_PUBLIC_REGISTRATION: "false"
-      # AUTH_AUTHENTIK_DEFAULT_ROLE_ID: ${DIRECTUS_DEFAULT_ROLE_ID}
-      # AUTH_AUTHENTIK_SCOPE: "openid profile email"
+      # --- Authentik OIDC (enabled) — roles assigned in Directus (Route B: no Authentik groups) ---
+      AUTH_PROVIDERS: authentik
+      AUTH_AUTHENTIK_DRIVER: openid
+      AUTH_AUTHENTIK_CLIENT_ID: ${OIDC_CLIENT_ID}
+      AUTH_AUTHENTIK_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+      AUTH_AUTHENTIK_ISSUER_URL: ${OIDC_ISSUER_URL}
+      AUTH_AUTHENTIK_IDENTIFIER_KEY: email
+      # Route B: auto-create SSO users as the default role (editor); promote admins by hand
+      # in Directus. WHO may log in is gated by Authentik's app-access policy (mentor's side).
+      AUTH_AUTHENTIK_ALLOW_PUBLIC_REGISTRATION: "true"
+      AUTH_AUTHENTIK_DEFAULT_ROLE_ID: ${DIRECTUS_DEFAULT_ROLE_ID}
+      AUTH_AUTHENTIK_SCOPE: "openid profile email"
     volumes:
       - directus_uploads:/directus/uploads
     expose:
