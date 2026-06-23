@@ -42,6 +42,12 @@ services:
 
       LOG_LEVEL: info
 
+      # Force SSO-only login: disable the default email/password provider so the only way in
+      # is "Log In with Authentik". Local admin password can no longer log in via the UI
+      # (break-glass = container CLI `directus users passwd`, or temporarily unset this).
+      # SAFE ONLY because real admins are promoted to Administrator on their Authentik accounts.
+      AUTH_DISABLE_DEFAULT: "true"
+
       # --- Authentik OIDC (enabled) — roles assigned in Directus (Route B: no Authentik groups) ---
       AUTH_PROVIDERS: authentik
       AUTH_AUTHENTIK_DRIVER: openid
