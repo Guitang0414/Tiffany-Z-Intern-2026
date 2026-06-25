@@ -1,0 +1,22 @@
+{
+  "name": "directus-extension-article-review-actions",
+  "version": "0.1.0",
+  "description": "审核操作 interface:一键『保存并发布 / 保存并驳回』,把正文编辑 + 状态变更原子提交(避免 Flow 按钮与表单未保存的 race)。",
+  "type": "module",
+  "private": true,
+  "directus:extension": {
+    "type": "interface",
+    "path": "dist/index.js",
+    "source": "src/index.ts",
+    "host": "^11.0.0"
+  },
+  "scripts": {
+    "build": "directus-extension build",
+    "dev": "directus-extension build -w --no-minify"
+  },
+  "devDependencies": {
+    "@directus/extensions-sdk": "^13.0.0",
+    "typescript": "^5.5.0",
+    "vue": "^3.4.0"
+  }
+}
