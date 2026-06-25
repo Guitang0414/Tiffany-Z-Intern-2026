@@ -12,7 +12,9 @@
 const URL_BASE = process.env.DIRECTUS_URL ?? 'http://localhost:8055';
 const EMAIL = process.env.ADMIN_EMAIL ?? 'admin@example.com';
 const PASSWORD = process.env.ADMIN_PASSWORD;
-if (!PASSWORD) { console.error('Set ADMIN_PASSWORD'); process.exit(1); }
+// cms-dev 禁用了密码登录(AUTH_DISABLE_DEFAULT),那里用 DIRECTUS_TOKEN(admin 静态 token)。
+const TOKEN_ENV = process.env.DIRECTUS_TOKEN;
+if (!TOKEN_ENV && !PASSWORD) { console.error('Set DIRECTUS_TOKEN (admin) or ADMIN_PASSWORD'); process.exit(1); }
 
 let token = '';
 async function api(method, path, body) {
@@ -41,7 +43,7 @@ async function patchField(field, meta) {
 }
 
 async function run() {
-  token = (await api('POST', '/auth/login', { email: EMAIL, password: PASSWORD })).access_token;
+  token = TOKEN_ENV ?? (await api('POST', '/auth/login', { email: EMAIL, password: PASSWORD })).access_token;
   console.log('✓ authenticated');
 
   // ---- 1) 字段 interface / 翻译 / 条件显示 ----
