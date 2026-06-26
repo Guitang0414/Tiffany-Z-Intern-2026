@@ -52,10 +52,25 @@ npm run build && npm start  # 编译后常驻
 
 提取事实 + 原创分析 + 本地视角**重写**(不翻译、不照搬原文);不抓图;不署名/不附原文链接(`source_url` 仅内部去重);付费墙跳过。
 
+## 部署(Docker)
+
+`Dockerfile`(多阶段:编译 TS + 原生 better-sqlite3)已就绪;`hermes-agent` 服务已加进 `ai-news/docker-compose.prod.yml`(内部 worker,不暴露端口)。
+
+### ⚠️ Claude 网关在 Tailscale 上 —— 容器要能进 tailnet
+容器默认不在 tailnet,连不到网关。两种解法:
+1. **host 网络(prod 默认)**:OVH 主机已在 tailnet,`network_mode: host` 让容器共享主机 tailnet,`GATEWAY_BASE_URL` 用 **tailnet IP**(`http://100.97.116.16:8317/v1`)。代价:不在 compose 网络里 → Directus 走**公网域名**(`HERMES_DIRECTUS_URL`)。
+2. **Tailscale sidecar**:加一个 tailscale 容器(需 `TS_AUTHKEY`),agent `network_mode: service:tailscale`。更干净但要 auth key。
+
+### Dokploy 部署
+1. 在 Dokploy Environment 填:`HERMES_DIRECTUS_URL` / `HERMES_DIRECTUS_TOKEN`(service token)/ `GATEWAY_BASE_URL`(tailnet IP)/ `GATEWAY_API_KEY` / `JINA_API_KEY`(见 `.env.prod.example`)。
+2. Redeploy → 镜像构建 + agent 随 cron 启动。
+
+### 本地开发
+Mac 上的容器进不了 tailnet,所以**本地直接跑原生**(`npm run dev` / `npm run once`),不用 docker-compose 跑 agent。
+
 ## 待办
 
-- **Twitter 源**(无 RSS,API 付费 / cookie 抓取,未定)
+- **Twitter 源**(无 RSS,API 付费 / cookie 抓取,mentor 未定)
 - **AI 分类**(taxonomy 未定,现按源默认分类占位)
-- **Docker 化** + 进 `ai-news` compose 的 `hermes-agent` 服务(§4.2.3)
 - 单元测试(各模块 mock 外部依赖)
 - 没现成 RSS 的源:KOMO / KIRO7 / seattle.gov / kingcounty.gov(PSBJ 付费墙跳过)

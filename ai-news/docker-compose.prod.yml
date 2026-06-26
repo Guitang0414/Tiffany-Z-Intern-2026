@@ -84,9 +84,42 @@ services:
       retries: 5
       start_period: 30s
 
+  # 内部 worker:自带 cron 抓新闻 → 改写 → POST Directus(PENDING)。不暴露端口/域名。
+  hermes-agent:
+    build:
+      context: ./hermes-agent
+    restart: unless-stopped
+    depends_on:
+      - directus
+    # ⚠️ Claude 网关在 Tailscale 上,容器默认进不了 tailnet。OVH 主机已在 tailnet,
+    #    故用 host 网络让容器共享主机 tailnet(GATEWAY_BASE_URL 用 tailnet IP)。
+    #    代价:不在 compose 网络里 → Directus 走公网域名(HERMES_DIRECTUS_URL)。
+    #    备选:Tailscale sidecar(需 TS_AUTHKEY)。见 hermes-agent/README.md。
+    network_mode: host
+    environment:
+      DIRECTUS_URL: ${HERMES_DIRECTUS_URL}            # 公网域名,如 https://cms.epochtimesnw.com
+      DIRECTUS_TOKEN: ${HERMES_DIRECTUS_TOKEN}         # service 账号 token(禁用 admin)
+      GATEWAY_BASE_URL: ${GATEWAY_BASE_URL}            # tailnet,如 http://100.97.116.16:8317/v1
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY}
+      MODEL_DEEP: ${MODEL_DEEP:-claude-sonnet-4-6}
+      MODEL_SHORT: ${MODEL_SHORT:-claude-haiku-4-5-20251001}
+      JINA_API_KEY: ${JINA_API_KEY}
+      JINA_MIN_INTERVAL_MS: "1500"
+      CRON_HIGH: "*/10 * * * *"
+      CRON_LOW: "0 8 * * *"
+      TZ: America/Los_Angeles
+      DAILY_TOKEN_BUDGET: "500000"
+      SQLITE_PATH: /app/cache/hermes.db
+      MAX_PER_RUN: "8"
+      LOG_LEVEL: info
+      NODE_ENV: production
+    volumes:
+      - hermes_cache:/app/cache
+
 volumes:
   directus_uploads:
   directus_pg_data:
+  hermes_cache:
 
 networks:
   dokploy-network:
