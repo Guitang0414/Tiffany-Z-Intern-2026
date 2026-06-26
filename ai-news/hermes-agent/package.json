@@ -1,0 +1,30 @@
+{
+  "name": "hermes-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hermes Agent — 自带 cron 的新闻抓取/改写 worker:RSS 发现 → Jina 取材 → Claude(网关)改写 → POST Directus(PENDING)。生产级模块化(deployment-plan §4.2)。",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts",
+    "once": "tsx src/main.ts --once",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5",
+    "node-cron": "^3.0.3",
+    "openai": "^4.67.3",
+    "pino": "^9.4.0",
+    "pino-pretty": "^11.2.2",
+    "rss-parser": "^3.13.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.16.5",
+    "@types/node-cron": "^3.0.11",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  }
+}

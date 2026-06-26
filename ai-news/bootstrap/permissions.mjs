@@ -37,7 +37,7 @@ async function api(method, path, body) {
 // so editors still can't forge it. (Keep it UI-readonly so editors don't try to edit it.)
 const EDITOR_WRITE = ['final_title', 'final_content', 'final_summary', 'content_type', 'status', 'rejection_reason', 'reviewed_by'];
 // service (Agent) creates with these
-const SERVICE_CREATE = ['source_url','source_title','source_content','source_site','source_published_at','ai_title','ai_content','ai_summary','final_title','final_content','final_summary','category_id'];
+const SERVICE_CREATE = ['source_url','source_title','source_content','source_site','source_published_at','ai_title','ai_content','ai_summary','final_title','final_content','final_summary','category_id','content_type'];
 // service (n8n) writes back these
 const SERVICE_UPDATE = ['wp_post_id','wp_url','wp_status','wp_error','wp_published_at','tweet_id','tweet_status','tweet_error','tweet_published_at','status','published_at','manual_intervention_required'];
 
