@@ -42,6 +42,10 @@ export async function fetchFullText(url: string, cap = 8000): Promise<string> {
 
 	const text = await res.text();
 	const noImages = text.replace(/!\[[^\]]*\]\([^)]*\)/g, ''); // 去掉 Markdown 图片
+	// Jina 偶尔 200 但正文是错误页(如 Reddit 403)。短 + 含错误标记 → 当取材失败,别拿去改写。
+	if (noImages.length < 800 && /Target URL returned error|returned error \d{3}|\b40[34]\b.*(Forbidden|Not Found)/i.test(noImages)) {
+		throw new RetryableError(`jina returned error page for ${url}`);
+	}
 	lg.debug({ url, len: noImages.length }, 'fetched');
 	return noImages.slice(0, cap);
 }
