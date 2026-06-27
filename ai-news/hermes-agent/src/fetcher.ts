@@ -27,6 +27,8 @@ export async function fetchFullText(url: string, cap = 8000): Promise<string> {
 	await throttle();
 	const headers: Record<string, string> = { 'User-Agent': 'hermes-agent/0.1' };
 	if (config.JINA_API_KEY) headers.Authorization = `Bearer ${config.JINA_API_KEY}`;
+	// 只抽文章主体:否则 Jina 返回整页,前几千字全是导航菜单,模型读到的是菜单不是文章。
+	headers['X-Target-Selector'] = 'article, main, [role="main"]';
 
 	let res: Response;
 	try {
@@ -46,14 +48,12 @@ export async function fetchFullText(url: string, cap = 8000): Promise<string> {
 	if (noImages.length < 800 && /Target URL returned error|returned error \d{3}|\b40[34]\b.*(Forbidden|Not Found)/i.test(noImages)) {
 		throw new RetryableError(`jina returned error page for ${url}`);
 	}
-	// 取实际正文(Jina 头部是 Title:/URL Source:/Markdown Content:)
+	// 取实际正文(Jina 头部是 Title:/URL Source:/Markdown Content:);X-Target-Selector 后这里已是干净文章
 	const body = noImages.includes('Markdown Content:') ? noImages.split('Markdown Content:').pop()!.trim() : noImages;
-	// 正文近乎为空 = 取材失败/被屏蔽 → 跳过。
-	// ⚠️ 不按 "subscribe/sign in" 字样判付费墙:Jina 返回整页,页眉页脚都带订阅 CTA,会误杀正常全文
-	// (如 Seattle Times)。付费墙导致的"只有导语"由 pipeline 的"元说明"守卫兜底(模型会说内容缺失)。
-	if (body.length < 500) {
+	// 正文近乎为空 = 取材失败/付费墙截断/选择器没命中 → 跳过(截断稿由 pipeline 守卫+最小长度兜底)。
+	if (body.length < 400) {
 		throw new RetryableError(`thin content for ${url} (body ${body.length} chars)`);
 	}
 	lg.debug({ url, len: body.length }, 'fetched');
-	return noImages.slice(0, cap);
+	return body.slice(0, cap); // 返回干净正文(不是整页),模型才读得到真文章
 }

@@ -100,12 +100,16 @@ export async function runLane(lane: Lane): Promise<void> {
 
 	const leads = await discover(lane);
 	const tally: Record<string, number> = {};
-	let processed = 0;
+	let published = 0; // 只数真正建成的(MAX_PER_RUN 限的是发布量)
+	let attempts = 0; // 取材/改写过的(防极端情况狂调 Claude)
+	const attemptCap = config.MAX_PER_RUN * 4;
 	for (const lead of leads) {
-		if (processed >= config.MAX_PER_RUN) break;
+		if (published >= config.MAX_PER_RUN || attempts >= attemptCap) break;
 		const r = await processLead(lead);
 		tally[r] = (tally[r] ?? 0) + 1;
-		if (r !== 'skip-dup' && r !== 'skip-lowvalue') processed++; // 重复/低价值的不占额度
+		if (r === 'created') published++;
+		// dedupe/低价值/预算跳过很便宜,不计入 attempt;做了取材改写的才计
+		if (r !== 'skip-dup' && r !== 'skip-lowvalue' && r !== 'skip-budget') attempts++;
 		if (r === 'skip-budget') { lg.warn('每日 token 预算用尽 — 停止本轮 Claude 调用'); break; }
 	}
 	lg.info({ lane, ms: Date.now() - t0, tally, manualReview: retryStore.countByStatus('manual_review') }, 'run done');
