@@ -71,6 +71,11 @@ async function processLead(lead: Lead): Promise<LeadResult> {
 		retryStore.saveManualReview(lead, 'rewrite parse empty');
 		return 'manual';
 	}
+	// 反幻觉副作用:取不到正文时模型会诚实说"内容缺失/无法撰写" → 别把这种声明建成文章
+	if (/未能.{0,4}加载|正文.{0,6}缺失|无法.{0,6}撰写|无法据此|内容未能(提供|获取)|无法.{0,8}完整报道/.test(rw.content)) {
+		retryStore.saveManualReview(lead, 'source unavailable (model declined to fabricate)');
+		return 'manual';
+	}
 
 	try {
 		return await publish(lead, rw, lead.defaultCategory);
