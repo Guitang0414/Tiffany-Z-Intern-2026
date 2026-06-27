@@ -46,6 +46,13 @@ export async function fetchFullText(url: string, cap = 8000): Promise<string> {
 	if (noImages.length < 800 && /Target URL returned error|returned error \d{3}|\b40[34]\b.*(Forbidden|Not Found)/i.test(noImages)) {
 		throw new RetryableError(`jina returned error page for ${url}`);
 	}
-	lg.debug({ url, len: noImages.length }, 'fetched');
+	// 取实际正文(Jina 头部是 Title:/URL Source:/Markdown Content:)
+	const body = noImages.includes('Markdown Content:') ? noImages.split('Markdown Content:').pop()!.trim() : noImages;
+	// 付费墙 / 截断:正文太短,或含订阅墙提示 → 当取材失败,别拿去改写(省 Claude + 避免"内容缺失"稿)
+	const paywall = /subscribe to (read|continue)|subscription required|sign in to (read|continue)|for subscribers|already a subscriber|create (a free )?account to (read|continue)/i;
+	if (body.length < 600 || paywall.test(body)) {
+		throw new RetryableError(`thin/paywalled content for ${url} (body ${body.length} chars)`);
+	}
+	lg.debug({ url, len: body.length }, 'fetched');
 	return noImages.slice(0, cap);
 }

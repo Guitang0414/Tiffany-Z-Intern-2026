@@ -71,9 +71,9 @@ async function processLead(lead: Lead): Promise<LeadResult> {
 		retryStore.saveManualReview(lead, 'rewrite parse empty');
 		return 'manual';
 	}
-	// 反幻觉副作用:取不到正文时模型会诚实说"内容缺失/无法撰写" → 别把这种声明建成文章
-	if (/未能.{0,4}加载|正文.{0,6}缺失|无法.{0,6}撰写|无法据此|内容未能(提供|获取)|无法.{0,8}完整报道/.test(rw.content)) {
-		retryStore.saveManualReview(lead, 'source unavailable (model declined to fabricate)');
+	// 反幻觉副作用:取不到/被截断正文时模型会写"内容缺失/被截断/请看原文"这类元说明 → 别建成文章
+	if (/截断|内容缺失|未能.{0,8}(呈现|提供|获取|加载|核实)|无法.{0,10}(撰写|核实|报道|进一步|完整|呈现)|(访问|查看|参见|详见|请看|前往).{0,12}原文|获取完整报道|原文(链接|网址)/.test(rw.content)) {
+		retryStore.saveManualReview(lead, 'source unavailable/truncated (model wrote a meta-disclaimer)');
 		return 'manual';
 	}
 
