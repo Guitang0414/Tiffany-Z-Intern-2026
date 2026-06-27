@@ -46,7 +46,8 @@ export async function postArticle(lead: Lead, rw: Rewritten, categoryId: string)
 	const res = await fetch(`${config.DIRECTUS_URL}/items/articles`, { method: 'POST', headers, body: JSON.stringify(body) });
 	if (res.ok) return 'created';
 	const txt = await res.text();
-	if (res.status === 422 && /unique/i.test(txt)) return 'duplicate';
+	// Directus 对 source_url unique 冲突返回 400(不是 422)。当重复处理,别塞重试队列。
+	if ((res.status === 400 || res.status === 422) && /unique/i.test(txt)) return 'duplicate';
 	lg.error({ status: res.status, body: txt.slice(0, 200) }, 'post failed');
 	throw new Error(`directus ${res.status}: ${txt.slice(0, 160)}`);
 }

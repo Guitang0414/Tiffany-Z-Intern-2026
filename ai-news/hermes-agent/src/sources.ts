@@ -2,6 +2,7 @@
 // 发现走 RSS(免费、零 token);Twitter 待定(无 RSS,以后接)。
 import Parser from 'rss-parser';
 import type { Lane, Lead, SourceFeed } from './types';
+import { normalizeUrl } from './normalizeUrl';
 import { log } from './logger';
 
 const lg = log('sources');
@@ -31,25 +32,28 @@ const parser = new Parser({
 	headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
 });
 
-const cleanUrl = (u: string) => u.split('?')[0].trim();
-
 /** 拉一个源,映射成 Lead[]。单源失败不影响其它源。 */
 async function discoverOne(src: SourceFeed): Promise<Lead[]> {
 	try {
 		const feed = await parser.parseURL(src.url);
 		const leads = (feed.items ?? [])
 			.filter((it) => it.link && it.title && !(src.skip && src.skip.test(it.title)))
-			.map<Lead>((it) => ({
-				sourceUrl: cleanUrl(it.link as string),
-				sourceTitle: (it.title ?? '').trim(),
-				sourceSite: src.name,
-				sourcePublishedAt: it.isoDate,
-				lane: src.lane,
-				contentType: src.contentType,
-				defaultCategory: src.defaultCategory,
-				fetchMode: src.fetchMode,
-				rssContent: (it.contentSnippet || (it as Record<string, unknown>).content || '').toString().slice(0, 4000),
-			}));
+			.map((it): Lead | null => {
+				const sourceUrl = normalizeUrl(it.link as string); // 跟 hook 一致的规范化,dedupe 才对得上
+				if (!sourceUrl) return null;
+				return {
+					sourceUrl,
+					sourceTitle: (it.title ?? '').trim(),
+					sourceSite: src.name,
+					sourcePublishedAt: it.isoDate,
+					lane: src.lane,
+					contentType: src.contentType,
+					defaultCategory: src.defaultCategory,
+					fetchMode: src.fetchMode,
+					rssContent: (it.contentSnippet || (it as Record<string, unknown>).content || '').toString().slice(0, 4000),
+				};
+			})
+			.filter((x): x is Lead => x !== null);
 		lg.info({ source: src.name, count: leads.length }, 'discovered');
 		return leads;
 	} catch (err) {
