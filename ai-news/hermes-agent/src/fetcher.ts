@@ -48,10 +48,11 @@ export async function fetchFullText(url: string, cap = 8000): Promise<string> {
 	}
 	// 取实际正文(Jina 头部是 Title:/URL Source:/Markdown Content:)
 	const body = noImages.includes('Markdown Content:') ? noImages.split('Markdown Content:').pop()!.trim() : noImages;
-	// 付费墙 / 截断:正文太短,或含订阅墙提示 → 当取材失败,别拿去改写(省 Claude + 避免"内容缺失"稿)
-	const paywall = /subscribe to (read|continue)|subscription required|sign in to (read|continue)|for subscribers|already a subscriber|create (a free )?account to (read|continue)/i;
-	if (body.length < 600 || paywall.test(body)) {
-		throw new RetryableError(`thin/paywalled content for ${url} (body ${body.length} chars)`);
+	// 正文近乎为空 = 取材失败/被屏蔽 → 跳过。
+	// ⚠️ 不按 "subscribe/sign in" 字样判付费墙:Jina 返回整页,页眉页脚都带订阅 CTA,会误杀正常全文
+	// (如 Seattle Times)。付费墙导致的"只有导语"由 pipeline 的"元说明"守卫兜底(模型会说内容缺失)。
+	if (body.length < 500) {
+		throw new RetryableError(`thin content for ${url} (body ${body.length} chars)`);
 	}
 	lg.debug({ url, len: body.length }, 'fetched');
 	return noImages.slice(0, cap);
