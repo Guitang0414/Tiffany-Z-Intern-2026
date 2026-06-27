@@ -71,9 +71,16 @@ async function processLead(lead: Lead): Promise<LeadResult> {
 		retryStore.saveManualReview(lead, 'rewrite parse empty');
 		return 'manual';
 	}
-	// 反幻觉副作用:取不到/被截断正文时模型会写"内容缺失/被截断/请看原文"这类元说明 → 别建成文章
-	if (/截断|内容缺失|未能.{0,8}(呈现|提供|获取|加载|核实)|无法.{0,10}(撰写|核实|报道|进一步|完整|呈现)|(访问|查看|参见|详见|请看|前往).{0,12}原文|获取完整报道|原文(链接|网址)/.test(rw.content)) {
+	// 取不到/截断正文时模型会写"内容缺失/无从获取/不在已知信息"这类元说明 → 别建成文章
+	if (/截断|内容缺失|无从(获取|确认|知晓|得知)|不在已知信息|已知信息之内|不得而知|未能.{0,8}(呈现|提供|获取|加载|核实)|无法.{0,10}(撰写|核实|报道|进一步|完整|呈现|获取)|(访问|查看|参见|详见|请看|前往).{0,12}原文|获取完整报道|原文(链接|网址)/.test(rw.content)) {
 		retryStore.saveManualReview(lead, 'source unavailable/truncated (model wrote a meta-disclaimer)');
+		return 'manual';
+	}
+	// 确定性兜底:改写太短 = 取材不足/失败,不够格当文章(不靠穷举措辞)
+	const minLen = lead.contentType === 'ARTICLE' ? 400 : 120;
+	const bodyLen = rw.content.replace(/\s/g, '').length;
+	if (bodyLen < minLen) {
+		retryStore.saveManualReview(lead, `content too short (${bodyLen} chars for ${lead.contentType})`);
 		return 'manual';
 	}
 
