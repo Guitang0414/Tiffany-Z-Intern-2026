@@ -22,7 +22,7 @@ const ANTI_AI = `【像记者写稿,不是 AI 总结 —— 严格遵守】
 【禁用词/套话(出现即算失败,用具体事实替代)】
 近日、引发关注、引发外界关注、保持低调、感情风波、坦诚分享、人情味、真实的人情味、流于形式、言语间流露出、历经波折、平静与笃定、婚姻稳固、长情组合、值得注意的是、与此同时、在……背景下、这一……;
 英文同理:sparked attention、opened up、kept a low profile、heartwarming、showed resilience。
-【写法】原创重写、无翻译腔;正文用 Markdown 段落(段间空行),不要 bullet/列表(-)/小标题(##)/HTML;少用加粗;**少用破折号(——),那是 AI 爱用的标志,一般逗号或句号就够**。
+【写法】原创重写、无翻译腔;正文用 Markdown 段落(段间空行),不要 bullet/列表(-)/小标题(##)/HTML;少用加粗;**禁止使用破折号(——、—、–)。中文不用破折号,需要停顿就用逗号或句号**。
 【信息不足时】如果原文只给了导语、被付费墙截断、或内容太少,**就只写你确实掌握的那几句,该多短就多短;绝对不要写「内容缺失/正文被截断/请看原文/无法核实」这类元说明,也不要为了凑长度而编造或空泛展开**。`;
 
 const DEEP = `${COMMON}
@@ -49,13 +49,22 @@ ${ANTI_AI}
 ===CONTENT===
 新闻正文`;
 
+// 确定性后处理:中文基本不用破折号,模型常漏改 → 代码强制替换,作为可靠保证。
+function cleanStyle(s: string): string {
+	return s
+		.replace(/[—–]+/g, '，') // 破折号(——/—/–)→ 逗号
+		.replace(/，{2,}/g, '，') // 收掉连续逗号
+		.replace(/([。！？；：、，])，/g, '$1') // 标点后多余逗号
+		.replace(/，([。！？；：])/g, '$1'); // 标点前多余逗号
+}
+
 function parseSections(text: string): Rewritten {
 	const grab = (tag: string) => {
 		const m = text.match(new RegExp(`===${tag}===(.*?)(?=\\n===|$)`, 's'));
 		return m ? m[1].trim() : '';
 	};
 	const content = grab('CONTENT').replace(/^```(?:markdown|md)?\s*|\s*```$/gs, '').trim();
-	return { title: grab('TITLE'), summary: grab('SUMMARY'), content };
+	return { title: cleanStyle(grab('TITLE')), summary: cleanStyle(grab('SUMMARY')), content: cleanStyle(content) };
 }
 
 /** 把一条线索的原文改写成中文。返回改写结果 + token 用量(供 budget 计)。 */
