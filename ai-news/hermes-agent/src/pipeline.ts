@@ -5,6 +5,7 @@ import { fetchFullText, RetryableError } from './fetcher';
 import { rewrite } from './claude';
 import { ensureCategory, postArticle, type PostResult } from './publisher';
 import { isDuplicate } from './dedupe';
+import { isNewsworthy } from './selector';
 import { retryStore } from './retryStore';
 import { budget } from './budget';
 import { config } from './config';
@@ -34,11 +35,13 @@ async function reprocessPending(): Promise<void> {
 	}
 }
 
-type LeadResult = PostResult | 'skip-dup' | 'skip-budget' | 'fetch-fail' | 'manual' | 'post-deferred';
+type LeadResult = PostResult | 'skip-dup' | 'skip-budget' | 'skip-lowvalue' | 'fetch-fail' | 'manual' | 'post-deferred';
 
 async function processLead(lead: Lead): Promise<LeadResult> {
 	if (await isDuplicate(lead.sourceUrl)) return 'skip-dup';
 	if (!budget.ok()) return 'skip-budget';
+	// 选题:低价值新闻(体育选秀/名人八卦/琐事)在取材前就跳过,省 Jina/Claude
+	if (!(await isNewsworthy(lead))) return 'skip-lowvalue';
 
 	let text: string;
 	if (lead.fetchMode === 'rss') {
@@ -90,7 +93,7 @@ export async function runLane(lane: Lane): Promise<void> {
 		if (processed >= config.MAX_PER_RUN) break;
 		const r = await processLead(lead);
 		tally[r] = (tally[r] ?? 0) + 1;
-		if (r !== 'skip-dup') processed++; // 重复的不占额度
+		if (r !== 'skip-dup' && r !== 'skip-lowvalue') processed++; // 重复/低价值的不占额度
 		if (r === 'skip-budget') { lg.warn('每日 token 预算用尽 — 停止本轮 Claude 调用'); break; }
 	}
 	lg.info({ lane, ms: Date.now() - t0, tally, manualReview: retryStore.countByStatus('manual_review') }, 'run done');
