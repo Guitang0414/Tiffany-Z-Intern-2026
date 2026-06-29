@@ -1,62 +1,92 @@
-// Claude 改写:走 OpenAI 兼容网关(Tailscale)。
-// 合规规则(mentor 定):提取事实 + 原创分析 + 本地视角重写,**不翻译、不照搬原文表达**;不抓图;不署名。
-// ⚠️ 网关前置了 Claude-Code system prompt → 指令必须放 user 消息(别用 system role)。
+// Claude 改寫：走 OpenAI 相容閘道（Tailscale）。
+// 輸出風格：《大紀元》西雅圖版（epochtimesnw.com）繁體中文。
+// 合規：提取事實重寫，不翻譯照搬，不點名來源媒體，不署具名記者。
+// ⚠️ 閘道前置了 Claude-Code system prompt → 指令必須放 user 消息（別用 system role）。
 import OpenAI from 'openai';
 import { config } from './config';
 import type { Lead, Rewritten, Usage } from './types';
 
 const client = new OpenAI({ baseURL: config.GATEWAY_BASE_URL, apiKey: config.GATEWAY_API_KEY });
 
-const COMMON = '【严格要求】直接输出结果,不要提问、不要解释、不要客套。';
+const COMMON = '【嚴格要求】直接輸出結果，不要提問、不要解釋、不要客套。';
 
-// 反 AI 腔的硬规则(DEEP/SHORT 共用)。目标:像 People / Variety / Deadline / 报社记者写的稿,
-// 不是 AI 总结。核心 = 具体事实优先、有引语就引、不脑补情绪、不编造、新闻式收尾。
-const ANTI_AI = `【像记者写稿,不是 AI 总结 —— 严格遵守】
-1. 只用原文里**确实有的事实**。绝对不要编造引语、人物、时间、地点、数字、情节;原文没有的细节一个字都别加。
-2. **具体优先于概括**:多写原文里的具体细节(谁、何时、在哪、做了什么、说了什么、多少、什么结果),少写抽象总结。
-3. **有原话就用直接引语**(译成中文并注明是谁说的);原文没有引语就不要硬造一句出来。
-4. **不要替人物揣测情绪/心理**:除非原文明确写了,否则不要写「平静与笃定」「历经波折」「言语间流露出」这类脑补。
-5. **每一段都要带出新的事实**,不要把上一段换个说法重复,也不要纯抒情。
-6. **段落长短不一、句子节奏有变化**;不要每段都「背景→总结→升华」的规整套路。
-7. **新闻式收尾**:结尾落在一个具体事实、下一步或未决问题上;**不要写评论式升华总结**(如「多了几分真实的人情味」)。
-【禁用词/套话(出现即算失败,用具体事实替代)】
-近日、引发关注、引发外界关注、保持低调、感情风波、坦诚分享、人情味、真实的人情味、流于形式、言语间流露出、历经波折、平静与笃定、婚姻稳固、长情组合、值得注意的是、与此同时、在……背景下、这一……;
-英文同理:sparked attention、opened up、kept a low profile、heartwarming、showed resilience。
-【合规:不署名、不暴露来源】绝不点名来源媒体(不写「据/由《西雅图时报》报道」「KING 5 称」「据报道」等),不出现「原文」「来源」「转载」等字样;以**本站独立报道**的口吻写,就当是本站记者自己采写的。信息不足时只说事实本身不知道,别把它归因到"原文/来源"。
-【写法】原创重写、无翻译腔;正文用 Markdown 段落(段间空行),不要 bullet/列表(-)/小标题(##)/HTML;少用加粗;**禁止使用破折号(——、—、–)。中文不用破折号,需要停顿就用逗号或句号**。
-【信息确实很少时才短】只有当原文真的只有一两句、或被截断到几乎没内容,才写短;**绝不写「内容缺失/被截断/请看原文/无法核实」这类元说明,也绝不编造或空泛注水**。但**只要原文有内容,就把事实写完整,不要无故写得很短**。`;
+// 大紀元西雅圖版核心風格規範（ARTICLE / SHORT 共用）。
+const EPOCH_STYLE = `【語言】繁體中文；台灣用語（資訊/短片/軟體/網際網路）；引號「」；書名號《》；省略號……；破折號——。
+【人名】首次出現：中文音譯（English Full Name），之後只用中文姓，不重複括號。使用台灣/港澳通行譯法，不用大陸譯法。
+【機構/組織】中文全名（English Name，英文縮寫），例：西雅圖市中心協會（Downtown Seattle Association，DSA）。
+【地名】固定用名：西雅圖、華盛頓州（簡稱華州）、美國。
+【數字】大數字用萬/億（1,400億美元、1萬8,000人）；百分比用%；距離英制+公制並列（400英里（644公里））；溫度以攝氏為主。
+【引述】姓說：「……」 或 姓表示，……；忠實翻譯，不改動政策數字或官員原話。
+【像記者寫稿，不是 AI 總結——嚴格遵守】
+1. 只用原文裡確實有的事實。絕對不要編造引語、人物、時間、數字、情節；原文沒有的細節一個字都別加。
+2. 具體優先於概括：寫原文裡的具體細節（誰、何時、在哪、做了什麼、說了什麼、多少、什麼結果），少寫抽象總結。
+3. 有原話就用直接引語（譯成中文並注明是誰說的）；原文沒有引語就不要硬造。
+4. 不要替人物揣測情緒/心理：除非原文明確寫了，否則不要寫「平靜與篤定」「歷經波折」「言語間流露出」這類腦補。
+5. 每段帶出新事實，不要把上一段換說法重複，也不要純抒情。
+6. 新聞式收尾：結尾落在具體事實、下一步或未決問題上，不寫評論式升華（如「多了幾分真實的人情味」）。
+【合規：不點名來源】絕不點名來源媒體（不寫「據《西雅圖時報》」「KING 5 稱」「據報導」等），不出現「原文」「翻譯」「轉載」等字樣；以本站獨立報道的口吻寫。
+【禁用套話】近日、引發關注、保持低調、值得注意的是、與此同時、在……背景下。`;
 
-const DEEP = `${COMMON}
-你是一名专业中文新闻记者(娱乐/文化稿参照 People / Variety / Deadline / Entertainment Weekly 的笔法),为面向西雅图华人社区的新闻站写稿。根据下面英文原文,用中文写一篇**完整、有深度的新闻报道**:不仅把原文的关键事实、来龙去脉、相关方说法与反应都写出来,还要交代**背景**,并给出**基于事实的原创分析**(这件事的意义、可能的影响、与更大趋势/政策的关系 —— 分析要站得住脚,不编造、不空喊口号)。**素材足够时正文写到 500~900 字**,有信息量有深度;但充实靠事实和分析,不是套话注水。
-${ANTI_AI}
-【本地视角】只有当确实跟西雅图/华盛顿州有真实关联(本地事件,或对本地居民有直接影响)才点出本地角度;纯国际/全国新闻就老实报道,**不要牵强地扯西雅图**。
-严格按下面格式输出(不要 JSON、不要多余文字):
+// 今天日期字串，供正文第一行固定格式使用。
+function todayStr(): string {
+	const d = new Date();
+	const yyyy = d.getFullYear();
+	const mm = String(d.getMonth() + 1).padStart(2, '0');
+	const dd = String(d.getDate()).padStart(2, '0');
+	return `${yyyy}年${mm}月${dd}日`;
+}
+
+function buildDeepPrompt(date: string): string {
+	return `${COMMON}
+你是《大紀元》西雅圖版（epochtimesnw.com）的中文編輯，請將下面英文新聞改寫成符合本報風格的繁體中文深度報導。
+
+${EPOCH_STYLE}
+
+【標題】10–25個中文字；可用一個空格分隔兩個語意組（「赤字逼近5億 西雅圖再尋稅源」）；數字用阿拉伯數字；動詞前置；不加標點結尾（問句除外）。
+
+【正文結構】
+- 第一行固定格式（直接輸出，不另起標題）：【${date}訊】（本報綜合編譯）第一句導言緊接著寫，即點出人物、事件、影響。
+- 之後自然分段，每段3–5句；較長文章可加粗體小標（不加「：」）。
+- 結尾落在具體事實或未決問題，不寫評論式升華。
+- 素材足夠時正文寫到500–900字，充實靠事實，不是套話注水。
+
+嚴格按下面格式輸出（不要 JSON、不要多餘文字）：
 ===TITLE===
-中文标题(具体、不标题党)
+繁體中文標題
 ===SUMMARY===
-<=120字摘要(陈述核心事实,别用套话)
+<=120字摘要（陳述核心事實，不用套話）
 ===CONTENT===
-新闻正文`;
+新聞正文（第一行即【${date}訊】格式）`;
+}
 
-const SHORT = `${COMMON}
-你是一名专业中文记者,为西雅图华人社区新闻站写**短而精**的快讯(150-300字)。根据下面内容用中文写。
-${ANTI_AI}
-【本地视角】本地相关性有就点,没有别硬凑。短讯写连贯的 1-2 段即可。
-严格按下面格式输出(不要 JSON、不要多余文字):
+function buildShortPrompt(date: string): string {
+	return `${COMMON}
+你是《大紀元》西雅圖版（epochtimesnw.com）的中文編輯，請將下面英文新聞改寫成符合本報風格的繁體中文快訊（150–300字）。
+
+${EPOCH_STYLE}
+
+【標題】10–20個中文字；數字用阿拉伯數字；動詞前置。
+
+【正文結構】
+- 第一行固定格式：【${date}訊】（本報綜合編譯）第一句導言。
+- 之後寫1–2段，每段3–4句；結尾落在具體事實上。
+
+嚴格按下面格式輸出：
 ===TITLE===
-中文标题
+繁體中文標題
 ===SUMMARY===
 <=80字摘要
 ===CONTENT===
-新闻正文`;
+快訊正文（第一行即【${date}訊】格式）`;
+}
 
-// 确定性后处理:中文基本不用破折号,模型常漏改 → 代码强制替换,作为可靠保证。
+// 確定性後處理：去掉連續逗號等排版問題。
+// 大紀元風格允許破折號（——），故不做替換。
 function cleanStyle(s: string): string {
 	return s
-		.replace(/[—–]+/g, '，') // 破折号(——/—/–)→ 逗号
-		.replace(/，{2,}/g, '，') // 收掉连续逗号
-		.replace(/([。！？；：、，])，/g, '$1') // 标点后多余逗号
-		.replace(/，([。！？；：])/g, '$1'); // 标点前多余逗号
+		.replace(/，{2,}/g, '，')
+		.replace(/([。！？；：、，])，/g, '$1')
+		.replace(/，([。！？；：])/g, '$1');
 }
 
 function parseSections(text: string): Rewritten {
@@ -68,12 +98,14 @@ function parseSections(text: string): Rewritten {
 	return { title: cleanStyle(grab('TITLE')), summary: cleanStyle(grab('SUMMARY')), content: cleanStyle(content) };
 }
 
-/** 把一条线索的原文改写成中文。返回改写结果 + token 用量(供 budget 计)。 */
+/** 把一條線索的原文改寫成繁體中文。返回改寫結果 + token 用量（供 budget 計）。 */
 export async function rewrite(lead: Lead, sourceText: string): Promise<{ rewritten: Rewritten; usage: Usage }> {
 	const isDeep = lead.contentType === 'ARTICLE';
+	const date = todayStr();
+	const prompt = isDeep ? buildDeepPrompt(date) : buildShortPrompt(date);
 	const resp = await client.chat.completions.create({
 		model: isDeep ? config.MODEL_DEEP : config.MODEL_SHORT,
-		messages: [{ role: 'user', content: `${isDeep ? DEEP : SHORT}\n\n原标题: ${lead.sourceTitle}\n\n原文(截断):\n${sourceText}` }],
+		messages: [{ role: 'user', content: `${prompt}\n\n原標題: ${lead.sourceTitle}\n\n原文（截斷）:\n${sourceText}` }],
 		max_tokens: isDeep ? 3000 : 900,
 		temperature: 0.3,
 	});
