@@ -1,5 +1,6 @@
-// 取材:Jina Reader(r.jina.ai)。带免费 key(500 RPM)+ 限流兜底 + 退避标记。
-// 只取正文文本,丢弃图片(合规:不抓图)。
+// 取材:Jina Reader(r.jina.ai) + fetcher-service(Agent-Reach wrapper)。
+// Jina 用於 Lane A 一般網頁；fetcher-service 用於 Reddit/Twitter(需帳號 auth)。
+// 只取正文文本，丟棄圖片(合規：不抓圖)。
 import { config } from './config';
 import { log } from './logger';
 
@@ -56,4 +57,34 @@ export async function fetchFullText(url: string, cap = 8000): Promise<string> {
 	}
 	lg.debug({ url, len: body.length }, 'fetched');
 	return body.slice(0, cap); // 返回干净正文(不是整页),模型才读得到真文章
+}
+
+/**
+ * 透過 fetcher-service (Agent-Reach) 取 Reddit/Twitter 正文。
+ * FETCHER_URL 未設定時拋 RetryableError，由 pipeline 降級到 rssContent。
+ */
+export async function fetchViaAgentReach(url: string, platform: string, cap = 8000): Promise<string> {
+	if (!config.FETCHER_URL) {
+		throw new RetryableError('FETCHER_URL not configured — fetcher-service not deployed');
+	}
+	let res: Response;
+	try {
+		res = await fetch(`${config.FETCHER_URL}/fetch`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ url, platform }),
+			signal: AbortSignal.timeout(45_000),
+		});
+	} catch (err) {
+		throw new RetryableError(`fetcher-service network error: ${(err as Error).message}`);
+	}
+	// 503 = backend not auth'd yet → retryable (不要浪費 manual_review slot)
+	if (res.status === 503) throw new RetryableError(`fetcher-service 503 (${platform} backend not ready)`);
+	if (!res.ok) throw new Error(`fetcher-service ${res.status} for ${url}`);
+	const data = await res.json() as { text: string };
+	if (!data.text || data.text.length < 100) {
+		throw new RetryableError(`fetcher-service thin content (${data.text?.length ?? 0} chars) for ${url}`);
+	}
+	lg.debug({ url, platform, len: data.text.length }, 'fetched via agent-reach');
+	return data.text.slice(0, cap);
 }

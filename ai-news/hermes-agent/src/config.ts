@@ -14,6 +14,9 @@ const schema = z.object({
 	JINA_API_KEY: z.string().optional().default(''),
 	JINA_MIN_INTERVAL_MS: z.coerce.number().int().nonnegative().default(1500),
 
+	// fetcher-service (Agent-Reach wrapper). 空字串 = 未部署，agent-reach 來源自動降級到 RSS。
+	FETCHER_URL: z.string().default(''),
+
 	CRON_HIGH: z.string().default('*/10 * * * *'),
 	CRON_LOW: z.string().default('0 8 * * *'),
 	TZ: z.string().default('America/Los_Angeles'),

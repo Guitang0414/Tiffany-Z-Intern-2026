@@ -20,10 +20,13 @@ export const SOURCES: SourceFeed[] = [
 	{ name: 'WSDOT', url: 'https://wsdot.wa.gov/rss.xml', lane: 'A', contentType: 'ARTICLE', defaultCategory: 'Local', fetchMode: 'jina' },
 	{ name: 'WA DOH', url: 'https://doh.wa.gov/rss.xml', lane: 'A', contentType: 'ARTICLE', defaultCategory: 'Local', fetchMode: 'jina' },
 
-	// Lane B — 热点短讯。Reddit 帖子页被 Jina 403,故直接用 RSS 内容;跳过 megathread/周帖等非新闻。
+	// Lane B — 熱點短訊。
+	// fetchMode: 'agent-reach' → fetcher-service 用 rdt-cli 取帖子全文（需 Reddit auth）。
+	// FETCHER_URL 未設或 rdt-cli 未 auth 時，pipeline 自動降級到 rssContent（薄，但不中斷）。
 	{
 		name: 'Reddit r/Seattle', url: 'https://www.reddit.com/r/Seattle/.rss', lane: 'B', contentType: 'SHORT',
-		defaultCategory: 'Trending', fetchMode: 'rss', skip: /megathread|weekly|daily|ask r\/seattle|^r\/seattle\b.*\b(thread|w)/i,
+		defaultCategory: 'Trending', fetchMode: 'agent-reach', platform: 'reddit',
+		skip: /megathread|weekly|daily|ask r\/seattle|^r\/seattle\b.*\b(thread|w)/i,
 	},
 ];
 

@@ -11,13 +11,15 @@ export interface SourceFeed {
 	contentType: ContentType;
 	/** 该源默认分类(taxonomy 未定前的占位;真 AI 分类待 mentor 定 taxonomy 后接） */
 	defaultCategory: string;
-	/** 取材方式:'jina'=抓全文(默认);'rss'=直接用 RSS 自带内容(如 Reddit,Jina 被 403)。 */
-	fetchMode: 'jina' | 'rss';
-	/** 跳过标题匹配此正则的条目(如 Reddit 的 megathread/周帖,非新闻)。 */
+	/** 取材方式:'jina'=抓全文;'rss'=直接用 RSS 内容;'agent-reach'=走 fetcher-service。 */
+	fetchMode: 'jina' | 'rss' | 'agent-reach';
+	/** fetchMode='agent-reach' 時傳給 fetcher-service 的平台標識。 */
+	platform?: 'reddit' | 'twitter' | 'youtube';
+	/** 跳過標題匹配此正則的條目(如 Reddit 的 megathread/週帖，非新聞)。 */
 	skip?: RegExp;
 }
 
-/** 发现阶段产出:一条待处理的新闻线索 */
+/** 發現階段產出：一條待處理的新聞線索 */
 export interface Lead {
 	sourceUrl: string;
 	sourceTitle: string;
@@ -26,8 +28,10 @@ export interface Lead {
 	lane: Lane;
 	contentType: ContentType;
 	defaultCategory: string;
-	fetchMode: 'jina' | 'rss';
-	/** RSS 自带内容(fetchMode='rss' 时直接用它,不调 Jina)。 */
+	fetchMode: 'jina' | 'rss' | 'agent-reach';
+	/** fetchMode='agent-reach' 時傳給 fetcher-service 的平台標識。 */
+	platform?: 'reddit' | 'twitter' | 'youtube';
+	/** RSS 自帶內容(fetchMode='rss'/'agent-reach' 降級時用)。 */
 	rssContent: string;
 }
 

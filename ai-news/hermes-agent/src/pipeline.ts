@@ -1,7 +1,7 @@
 // 编排:discover → dedupe → fetch → rewrite → budget → publish → retry/cache。
 // 低耦合:本模块只调各模块的公开函数,模块之间不互相依赖。
 import { discover } from './sources';
-import { fetchFullText, RetryableError } from './fetcher';
+import { fetchFullText, fetchViaAgentReach, RetryableError } from './fetcher';
 import { rewrite } from './claude';
 import { ensureCategory, postArticle, type PostResult } from './publisher';
 import { isDuplicate } from './dedupe';
@@ -45,15 +45,28 @@ async function processLead(lead: Lead): Promise<LeadResult> {
 
 	let text: string;
 	if (lead.fetchMode === 'rss') {
-		// Reddit 等:帖子页被 Jina 403,直接用 RSS 内容。太薄就跳过(别浪费 manual_review)。
 		text = lead.rssContent.trim();
 		if (text.length < 150) { lg.debug({ url: lead.sourceUrl }, 'rss content too thin — skip'); return 'fetch-fail'; }
+	} else if (lead.fetchMode === 'agent-reach') {
+		// Agent-Reach（fetcher-service）取帖子全文。
+		// FETCHER_URL 未設 或 rdt-cli 未 auth → RetryableError → 降級用 RSS 內容（薄但不中斷）。
+		try {
+			text = await fetchViaAgentReach(lead.sourceUrl, lead.platform ?? 'web');
+		} catch (err) {
+			const rssText = lead.rssContent.trim();
+			if (rssText.length < 150) {
+				lg.warn({ url: lead.sourceUrl, err: (err as Error).message }, 'agent-reach failed + rss too thin → skip');
+				return 'fetch-fail';
+			}
+			lg.warn({ url: lead.sourceUrl, err: (err as Error).message }, 'agent-reach failed → falling back to rss content');
+			text = rssText;
+		}
 	} else {
 		try {
 			text = await fetchFullText(lead.sourceUrl);
 		} catch (err) {
 			const kind = err instanceof RetryableError ? 'retryable' : 'error';
-			lg.warn({ url: lead.sourceUrl, kind, err: (err as Error).message }, 'fetch failed (skip; 下轮 RSS 再现)');
+			lg.warn({ url: lead.sourceUrl, kind, err: (err as Error).message }, 'fetch failed (skip; 下輪 RSS 再現)');
 			return 'fetch-fail';
 		}
 	}
