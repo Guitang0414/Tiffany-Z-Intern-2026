@@ -1,302 +1,193 @@
-# 系统架构文档 (System Architecture)
+# 系統架構文檔
 
-> 本文档为 [HL-Intern-Project.md](../HL-Intern-Project.md) 的配套架构文档，使用 Mermaid 图表描述系统各层的关系与数据流。
+> epochtimesnw.com 新聞自動化流水線的實際部署架構。
+> 部署平台：OVH VPS + Dokploy + Traefik。最後更新：2026-06-30。
 
 ---
 
-## 1. 系统架构总览
+## 1. 系統總覽
 
 ```mermaid
 graph TB
-    subgraph sandbox["🔒 Agent Sandbox (Hetzner VPS 隔离容器)"]
-        OC["Hermes Agent"]
-        Claude["Claude API"]
+    subgraph sources["📰 新聞來源（Lane A + B）"]
+        RSS_A["Lane A — 9 個西雅圖本地源\nSeattle Times / KING5 / FOX13\nMyNorthwest / Crosscut / GeekWire\nPort of Seattle / WSDOT / WA DOH\nThe Urbanist / Publicola"]
+        RSS_B["Lane B — Reddit r/Seattle RSS"]
     end
 
-    subgraph core["☁️ Core Backend (Hetzner VPS / Dokploy)"]
-        API["FastAPI Server"]
-        Auth["JWT Auth<br/>Middleware"]
-        Dist["Distribution<br/>Service"]
+    subgraph tailnet["🔒 Tailscale Tailnet（私有網絡）"]
+        subgraph ovh["☁️ OVH VPS — Dokploy"]
+            Directus["Directus CMS\n:8055（內部）\ncms.epochtimesnw.com"]
+            PG[("PostgreSQL 16")]
+            Hermes["hermes-agent\n(Node.js/TypeScript)\nnetwork_mode: host"]
+            Fetcher["fetcher-service\n(Python/FastAPI)\nlocalhost:8081"]
+        end
+
+        subgraph residential["🏠 住宅 IP Relay 節點"]
+            Lenovo["Lenovo Desktop\nseattle-eet-lenovo-product\n:8082（fetch-relay）"]
+            Friends["朋友電腦 1..N\n:8082（fetch-relay）"]
+        end
+
+        subgraph claude_gw["🧠 Claude 閘道"]
+            Gateway["Hermes Gateway\n(Tailscale IP)\nOpenAI-compatible API"]
+        end
     end
 
-    subgraph db["💾 Database (PostgreSQL)"]
-        PG[("PostgreSQL")]
+    subgraph external["🌐 外部服務"]
+        Jina["Jina Reader\nr.jina.ai"]
+        WP["WordPress\nepachtimesnw.com"]
     end
 
-    subgraph frontend["🖥️ Frontend (Dokploy)"]
-        UI["React + Vite<br/>Dashboard"]
-    end
+    %% 數據流
+    RSS_A & RSS_B -->|"RSS 發現"| Hermes
+    Hermes -->|"Lane A: Jina 全文"| Fetcher
+    Hermes -->|"Lane B: Reddit 全文\n(opencli/rdt-cli)"| Fetcher
+    Fetcher -->|"1st: 有 key 請求"| Jina
+    Fetcher -->|"2nd: Jina 失敗時 fallback"| Lenovo & Friends
+    Hermes -->|"改寫請求\n(Tailscale IP)"| Gateway
+    Gateway -->|"Claude Sonnet/Haiku"| Hermes
+    Hermes -->|"REST API\n(service token)"| Directus
+    Directus --- PG
+    Directus -->|"Webhook 觸發"| WP
 
-    subgraph external["🌐 External Services"]
-        TG["Telegram Bot"]
-        WP["WordPress"]
-        TW["Twitter / X"]
-    end
-
-    subgraph sources["📰 News Sources"]
-        NS1["TechCrunch"]
-        NS2["The Verge"]
-        NS3["..."]
-    end
-
-    %% Agent 层数据流
-    NS1 & NS2 & NS3 -->|"抓取"| OC
-    OC -->|"改写请求"| Claude
-    Claude -->|"改写结果"| OC
-    OC -->|"Webhook POST<br/>(X-Agent-Key)"| API
-    OC -->|"通知"| TG
-
-    %% 后端内部
-    API --> Auth
-    API --> PG
-    API --> Dist
-
-    %% 前端交互
-    UI -->|"REST API<br/>(JWT)"| API
-
-    %% 分发
-    Dist -->|"REST API"| WP
-    Dist -->|"API v2"| TW
-    Dist -->|"通知"| TG
-
-    %% 样式
-    style sandbox fill:#fff3e0,stroke:#e65100,stroke-width:2px
-    style core fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
-    style db fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
-    style frontend fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    style external fill:#fce4ec,stroke:#c62828,stroke-width:2px
+    style ovh fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    style residential fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style claude_gw fill:#fff3e0,stroke:#e65100,stroke-width:2px
     style sources fill:#f5f5f5,stroke:#616161,stroke-width:1px
+    style external fill:#fce4ec,stroke:#c62828,stroke-width:1px
 ```
-
-### 架构要点
-
-1. **Agent 层物理隔离：** Agent 运行在 Hetzner VPS 的隔离容器中，仅通过 HTTP Webhook 与核心后端通信，无法直连数据库
-2. **核心后端集中处理：** FastAPI 作为唯一的数据入口和出口，统一管理认证、业务逻辑和第三方分发
-3. **前端部署：** React SPA 通过 Dokploy 部署，通过 HTTPS 调用 API
-4. **分发层解耦：** WordPress 和 Twitter 的分发相互独立，单个失败不影响另一个
 
 ---
 
-## 2. 核心数据流：新闻从抓取到发布
+## 2. 容器組成（docker-compose.prod.yml）
+
+| 容器 | 網絡模式 | 監聽端口 | 說明 |
+|------|---------|---------|------|
+| `directus` | compose default + dokploy-network | 8055（內部） | CMS，Traefik 反代到 cms.epochtimesnw.com |
+| `postgres` | compose default | 5432（內部） | Directus 專用 DB |
+| `hermes-agent` | `host`（共享主機網絡） | — | 定時 cron，調 Tailscale 閘道需要 host 網絡 |
+| `fetcher-service` | `host` | 127.0.0.1:8081 | Agent-Reach wrapper，僅 loopback |
+
+> `hermes-agent` 和 `fetcher-service` 使用 `network_mode: host`，因為 Claude 閘道在 Tailscale tailnet 上，容器需要繼承主機的 Tailscale 網絡訪問權。代價：兩個容器不在 compose 內部網絡，Directus 走公網域名（`HERMES_DIRECTUS_URL`）。
+
+---
+
+## 3. 新聞流水線數據流
 
 ```mermaid
 sequenceDiagram
-    participant NS as 📰 新闻源
-    participant Agent as 🤖 Hermes Agent
-    participant Claude as 🧠 Claude API
-    participant TG as 💬 Telegram
-    participant API as ⚙️ FastAPI
-    participant DB as 💾 PostgreSQL
-    participant UI as 🖥️ 编辑工作台
-    participant WP as 📝 WordPress
-    participant TW as 🐦 Twitter
+    participant RSS as 📰 RSS 源
+    participant HA as hermes-agent
+    participant FS as fetcher-service
+    participant Relay as 🏠 Relay 節點
+    participant Jina as Jina Reader
+    participant GW as Claude 閘道
+    participant Dir as Directus CMS
 
-    Note over Agent: 定时唤醒 (HEARTBEAT)
+    Note over HA: cron 觸發（每 10 分鐘 Lane A，每天 8am Lane B）
 
-    rect rgb(255, 243, 224)
-        Note right of NS: Phase 1: 抓取与改写
-        Agent->>NS: Playwright 抓取页面
-        NS-->>Agent: HTML 内容
-        Agent->>Claude: 发送原文 + 改写 Prompt
-        Claude-->>Agent: 返回改写后的标题/正文/摘要
+    HA->>RSS: 拉 RSS feed
+    RSS-->>HA: 條目列表
+
+    HA->>HA: dedupe（SQLite 本地緩存）
+    HA->>HA: isNewsworthy（低價值跳過）
+
+    alt Lane A（ARTICLE，Jina 抓全文）
+        HA->>FS: POST /fetch {url, platform: web}
+        FS->>Jina: r.jina.ai/URL（帶 API key）
+        Jina-->>FS: Markdown 全文
+        alt Jina 失敗
+            FS->>Relay: POST /fetch {url}（輪詢 RELAY_URLS）
+            Relay-->>FS: 住宅 IP 抓取的 HTML→text
+        end
+        FS-->>HA: {text}
+    else Lane B（SHORT，Reddit 全文）
+        HA->>FS: POST /fetch {url, platform: reddit}
+        FS->>FS: opencli reddit read URL（OVH: rdt read URL）
+        FS-->>HA: {text}（失敗時降級返回 RSS 摘要）
     end
 
-    rect rgb(227, 242, 253)
-        Note right of Agent: Phase 2: 入库与通知
-        Agent->>API: POST /webhook/incoming-news<br/>(X-Agent-Key 认证)
-        API->>API: 校验 API Key
-        API->>DB: INSERT news_articles (status=PENDING)
-        DB-->>API: 201 Created
-        API-->>Agent: 201 + article_id
-        Agent->>TG: 发送通知「新线索入库」
-    end
+    HA->>GW: chat.completions（大紀元風格 prompt）
+    GW-->>HA: 繁體中文改寫結果
 
-    rect rgb(232, 245, 233)
-        Note right of UI: Phase 3: 人工审核
-        UI->>API: GET /news?status=PENDING (JWT)
-        API->>DB: SELECT WHERE status=PENDING
-        DB-->>API: 返回待审列表
-        API-->>UI: JSON 列表
-        UI->>UI: 编辑查看原文对照，修改 AI 内容
-        UI->>API: PUT /news/{id} (保存修改)
-        API->>DB: UPDATE ai_title, ai_content
-        UI->>API: POST /news/{id}/publish (审批通过)
-        API->>DB: UPDATE status=PUBLISHING
-    end
+    HA->>Dir: PATCH /items/articles（service token）
+    Dir-->>HA: 201 Created
 
-    rect rgb(252, 228, 236)
-        Note right of API: Phase 4: 自动分发
-        API->>WP: POST /wp-json/wp/v2/posts
-        WP-->>API: 200 + wp_post_id
-        API->>DB: UPDATE wp_post_id
-        API->>TW: POST /2/tweets (标题+链接)
-        TW-->>API: 200 + tweet_id
-        API->>DB: UPDATE tweet_id, status=PUBLISHED
-        API->>TG: 发送通知「文章已发布」
-    end
+    Note over Dir: 編輯在 Directus 審核、發布 → WordPress webhook
 ```
 
 ---
 
-## 3. 状态机详解
+## 4. 改寫風格（Epoch Times NW）
 
-```mermaid
-stateDiagram-v2
-    [*] --> PENDING: Agent 推送入库
+hermes-agent 統一用《大紀元》西雅圖版風格改寫：
 
-    PENDING --> PUBLISHING: 编辑审批通过
-    PENDING --> REJECTED: 编辑驳回
-
-    PUBLISHING --> PUBLISHED: 全部分发成功
-    PUBLISHING --> FAILED: 任一分发失败
-
-    FAILED --> PUBLISHING: 管理员手动重试
-
-    REJECTED --> PENDING: 重新提交 (可选)
-
-    PUBLISHED --> [*]
-
-    note right of PENDING
-        编辑可在此状态下
-        修改标题和正文
-    end note
-
-    note right of FAILED
-        记录具体失败原因
-        (WP 失败 / Twitter 失败)
-    end note
-```
-
-### 状态说明
-
-| 状态 | 含义 | 允许的操作 |
-| :--- | :--- | :--- |
-| `PENDING` | 待审核 | 编辑修改、审批、驳回 |
-| `PUBLISHING` | 分发中 | 等待（后端自动处理） |
-| `PUBLISHED` | 已发布 | 只读 |
-| `FAILED` | 分发失败 | 管理员重试 |
-| `REJECTED` | 已驳回 | 可重新提交至 PENDING |
+| 項目 | 規範 |
+|------|------|
+| 語言 | 繁體中文，台灣用語（資訊/軟體/網際網路） |
+| 引號 | 「」書名《》省略號…… 破折號—— |
+| 署名 | `【YYYY年MM月DD日訊】（本報綜合編譯）` |
+| 人名 | 首次：中文音譯（English Full Name），之後只用姓 |
+| 數字 | 萬/億（1,400億美元）、百分比 %、英制+公制並列 |
+| Lane A | 500–900 字深度報導，Claude Sonnet |
+| Lane B | 150–300 字快訊，Claude Haiku |
 
 ---
 
-## 4. ER 数据模型
-
-```mermaid
-erDiagram
-    users {
-        uuid id PK
-        varchar username UK "登录用户名"
-        varchar password_hash "bcrypt 哈希"
-        varchar display_name "显示名称"
-        varchar role "editor / admin"
-        timestamp created_at
-    }
-
-    news_articles {
-        uuid id PK
-        varchar source_url UK "原始链接 (去重)"
-        varchar source_title "原始标题"
-        text source_content "原始正文"
-        varchar source_site "来源站点"
-        varchar ai_title "AI 标题"
-        text ai_content "AI 正文"
-        varchar ai_summary "AI 摘要 (≤280字符)"
-        varchar status "PENDING/PUBLISHING/PUBLISHED/FAILED/REJECTED"
-        text rejection_reason "驳回原因"
-        uuid reviewed_by FK "审核人"
-        timestamp published_at "发布时间"
-        integer wp_post_id "WordPress 回执"
-        varchar tweet_id "Twitter 回执"
-        timestamp created_at
-        timestamp updated_at
-    }
-
-    users ||--o{ news_articles : "审核"
-```
-
----
-
-## 5. 部署拓扑
+## 5. fetch-relay 住宅 IP 網絡
 
 ```mermaid
 graph LR
-    subgraph internet["🌐 Internet"]
-        Editor["编辑 (浏览器)"]
-        NewsWeb["新闻网站"]
+    subgraph ovh["OVH（Datacenter IP）"]
+        FS["fetcher-service"]
     end
 
-    subgraph hetzner["☁️ Hetzner VPS (5.78.203.102) — Dokploy"]
-        subgraph frontend_deploy["Frontend"]
-            ReactSPA["React SPA"]
-        end
-        subgraph backend_deploy["Backend"]
-            FastAPI["FastAPI<br/>Container"]
-        end
-        subgraph db_deploy["Database"]
-            PG[("PostgreSQL")]
-        end
-        subgraph agent_deploy["🔒 Agent (隔离容器)"]
-            Agent["Hermes Agent"]
-        end
-        FastAPI -->|"内部连接"| PG
+    subgraph tailnet["Tailscale Tailnet"]
+        FS -->|"1. Jina（有 key）"| Jina["r.jina.ai"]
+        FS -->|"2. Jina 失敗"| L["Lenovo\n100.97.116.16:8082"]
+        FS -->|"3. Lenovo 失敗"| F1["朋友 A:8082"]
+        FS -->|"4. ..."| F2["朋友 B:8082"]
     end
 
-    Editor -->|"HTTPS"| ReactSPA
-    ReactSPA -->|"API calls"| FastAPI
-    Agent -->|"Webhook HTTPS"| FastAPI
-    Agent -->|"HTTP/HTTPS"| NewsWeb
-
-    style hetzner fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
-    style agent_deploy fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    L & F1 & F2 -->|"住宅 IP 直取"| Web["目標網站"]
 ```
 
-### 部署细节
-
-| 组件 | 平台 | 配置 |
-| :--- | :--- | :--- |
-| FastAPI | Hetzner VPS (Dokploy) | 容器化部署 |
-| PostgreSQL | Hetzner VPS (Dokploy) | 本地数据库实例 |
-| React Frontend | Hetzner VPS (Dokploy) | 自动 CI/CD，绑定 GitHub 仓库 |
-| Hermes Agent | Hetzner VPS (Dokploy 隔离容器) | 受限环境运行 |
+每個 relay 節點是一個極簡 Python HTTP 服務（`fetch-relay/relay.py`），監聽在 Tailscale IP 上，公網不可達。
 
 ---
 
-## 6. 安全边界
+## 6. 新聞源清單
 
-```mermaid
-graph TB
-    subgraph trust_none["❌ Zero Trust Zone"]
-        Agent["Hermes Agent"]
-    end
+### Lane A — 深度報導（ARTICLE，500–900 字）
 
-    subgraph trust_low["⚠️ Low Trust Zone"]
-        Frontend["React Frontend"]
-    end
+| 源 | RSS URL | 分類 |
+|----|---------|------|
+| Seattle Times | seattletimes.com/feed/ | Local |
+| KING 5 | king5.com/feeds/syndication/rss/news | Local |
+| FOX 13 Seattle | fox13seattle.com/rss.xml | Local |
+| MyNorthwest | mynorthwest.com/feed/ | Local |
+| Cascade PBS (Crosscut) | cascadepbs.org/articles/briefs/rss/ | Local |
+| GeekWire | geekwire.com/feed/ | Local |
+| Port of Seattle | portseattle.org/rss.xml | Local |
+| WSDOT | wsdot.wa.gov/rss.xml | Local |
+| WA DOH | doh.wa.gov/rss.xml | Local |
+| The Urbanist | theurbanist.org/feed/ | Housing & Urban |
+| Publicola | publicola.com/feed/ | Politics |
 
-    subgraph trust_high["✅ High Trust Zone"]
-        API["FastAPI"]
-        DB[("PostgreSQL")]
-    end
+### Lane B — 快訊（SHORT，150–300 字）
 
-    subgraph external["🌐 External"]
-        WP["WordPress"]
-        TW["Twitter"]
-        TG["Telegram"]
-    end
+| 源 | 取材方式 |
+|----|---------|
+| Reddit r/Seattle | agent-reach（rdt-cli/opencli），失敗降級 RSS |
 
-    Agent -->|"API Key<br/>Rate Limited"| API
-    Frontend -->|"JWT<br/>CORS 白名单"| API
-    API -->|"内网直连<br/>参数化查询"| DB
-    API -->|"API Credentials<br/>(env vars)"| WP & TW & TG
+---
 
-    style trust_none fill:#ffebee,stroke:#c62828,stroke-width:2px
-    style trust_low fill:#fff8e1,stroke:#f57f17,stroke-width:2px
-    style trust_high fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-```
+## 7. 安全邊界
 
-### 信任边界说明
-
-- **Zero Trust (Agent):** Agent 被视为不可信组件，所有来自 Agent 的数据均需校验。API Key 可随时轮换。
-- **Low Trust (Frontend):** 前端用户已通过 JWT 认证，但仍需后端做权限校验和输入清洗。
-- **High Trust (API ↔ DB):** 内网通信，使用 ORM 参数化查询，信任度最高。
-- **External Services:** 使用各平台官方 API，凭证通过环境变量管理，不硬编码。
+| 組件 | 認證方式 | 網絡 |
+|------|---------|------|
+| hermes-agent → Directus | service account static token | 公網 HTTPS |
+| hermes-agent → Claude 閘道 | API key | Tailscale（私有） |
+| hermes-agent → fetcher-service | 無（loopback 127.0.0.1） | host loopback |
+| fetcher-service → relay 節點 | 無（Tailscale 做網絡隔離） | Tailscale（私有） |
+| Directus → WordPress | WordPress App Password | 公網 HTTPS |
+| 編輯 → Directus | Authentik OIDC SSO | 公網 HTTPS |

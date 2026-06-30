@@ -1,88 +1,296 @@
-# Dokploy 部署 runbook — Directus 数据层
+# 部署 Runbook — ai-news
 
-把 `ai-news` 的 Directus 数据层部署到公司 **OVH VPS + Dokploy + Traefik**。
-依据 `docs/deployment-plan.md`。**Phase 1 用本地 admin 账号登录,Phase 2 再接 Authentik OIDC。**
+OVH VPS + Dokploy + Traefik。最後更新：2026-06-30。
 
-## 0. 先决条件(找 mentor 要)
-
-- [ ] **Dokploy 访问权限**(能登录 Dokploy 面板、创建 service)
-- [ ] **域名** —— 给 Directus 用,如 `cms.epochtimesnw.com`(或一个 dev 子域名)
-- [ ] 生成的 secrets(`openssl rand -base64 32`):`DIRECTUS_KEY`、`DIRECTUS_SECRET`、`POSTGRES_PASSWORD`、`ADMIN_PASSWORD`
-- [ ] (Phase 2,可后补)Authentik 里建一个 OIDC application + client id/secret
-
-## 1. 在 Dokploy 创建 Compose service
-
-- Project:`ai-news`(若无则新建)
-- 类型:**Compose**
-- Source:本仓库 git,分支 `dev`(或 release 分支)
-- **Compose Path**:`ai-news/docker-compose.prod.yml`
-- Build:Dokploy 会按 `ai-news/Dockerfile` 构建(自动把 hooks 扩展编译进镜像)
-
-## 2. 配环境变量(Dokploy → Environment)
-
-照 `.env.prod.example` 填。**`ARTICLES_SERVICE_ROLE_IDS` 先留空**(第 6 步再填):
-
-```
-DIRECTUS_KEY=...           DIRECTUS_SECRET=...      PUBLIC_URL=https://cms.epochtimesnw.com
-POSTGRES_USER=directus     POSTGRES_PASSWORD=...    POSTGRES_DB=directus
-ADMIN_EMAIL=...            ADMIN_PASSWORD=...        ARTICLES_SERVICE_ROLE_IDS=
-```
-
-## 3. 配域名(Dokploy → Domains)
-
-- Host:`cms.epochtimesnw.com`
-- Container Port:**8055**
-- HTTPS:开(Let's Encrypt 自动)—— 跟现有 outline/n8n 一致
-
-## 4. 部署
-
-点 **Deploy**。Dokploy 会:构建镜像 → 起 postgres(等 healthy)→ 起 directus。
-看日志出现 `Server started` + `Extensions loaded` 即成功。
-
-## 5. 首次登录
-
-浏览器开 `https://cms.epochtimesnw.com`,用 `ADMIN_EMAIL` / `ADMIN_PASSWORD` 登录。
-
-## 6. 套用 schema + 权限(关键)
-
-新实例是空的,要把 schema 和权限灌进去。在**能访问该实例**的机器上(本地连公网 URL,或 Dokploy 的 service terminal)跑:
-
-```bash
-# A) schema:用快照套用(推荐,§6.3)
-#    把 snapshots/20260615-schema.yaml 传进 directus 容器后:
-docker exec <directus-container> npx directus schema apply --yes /path/snapshot.yaml
-#    或者直接跑脚本:
-DIRECTUS_URL=https://cms.epochtimesnw.com ADMIN_EMAIL=... ADMIN_PASSWORD=... node bootstrap/schema.mjs
-
-# B) M2M + 权限
-DIRECTUS_URL=https://cms.epochtimesnw.com ADMIN_EMAIL=... ADMIN_PASSWORD=... node bootstrap/add-m2m.mjs
-DIRECTUS_URL=https://cms.epochtimesnw.com ADMIN_EMAIL=... ADMIN_PASSWORD=... node bootstrap/permissions.mjs
-#    ^ 末尾会打印 SERVICE ROLE ID
-```
-
-> ⚠️ `permissions.mjs` 里建的 dev 测试用户(editor@example.com / agent 静态 token)**生产别用** ——
-> 真账号 Phase 2 走 Authentik;Agent/n8n 的 token 用真 secret,别用 `svc-static-token-123`。
-> 生产可把脚本末尾建测试用户那段删掉再跑。
-
-**拿到 SERVICE ROLE ID 后** → 回 Dokploy Environment 把 `ARTICLES_SERVICE_ROLE_IDS` 填上 → **重新 Deploy**(让 hook 认出机器身份)。
-
-## 7. 验收
-
-对线上实例跑 `ACCEPTANCE.md` 的行为测试(状态机、immutable、去重)。至少确认:
-- 非法状态跳转返 422
-- editor 改 `ai_*` 被拒
-- 同 source_url 去重
-
-## 8. Phase 2:接 Authentik OIDC(mentor 给 app 之后)
-
-1. `docker-compose.prod.yml` 取消注释 `AUTH_AUTHENTIK_*` 那段
-2. Dokploy Environment 填 `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_ISSUER_URL` / `DIRECTUS_DEFAULT_ROLE_ID`
-3. 重新 Deploy → 编辑用 Authentik 账号 SSO 登录(详见 deployment-plan §5)
+自動部署：push `main` 分支 → Dokploy GitHub webhook 觸發 rebuild。
+日常開發在 `dev` 分支，功能完成後 PR → main。
 
 ---
 
-## 备注
+## 目錄
 
-- **prod 与 dev 的区别**:prod 不暴露端口、扩展打进镜像、走 dokploy-network、secret 走 Dokploy。dev 那套(`docker-compose.yml`)只本地用。
-- **schema vs 权限的 source of truth**:schema = snapshot;权限 = `bootstrap/permissions.mjs`(快照不含权限)。改了要分别更新。
-- **Directus 独占业务 DB**:Hermes Agent / n8n 一律走 Directus REST API,不直连这个 Postgres(§1.2)。
+1. [Directus CMS 首次部署](#1-directus-cms-首次部署)
+2. [hermes-agent 環境變量](#2-hermes-agent-環境變量)
+3. [fetcher-service — Reddit Auth 設置](#3-fetcher-service--reddit-auth-設置)
+4. [fetch-relay — 住宅 IP 節點](#4-fetch-relay--住宅-ip-節點)
+5. [Tailscale SSH 設置](#5-tailscale-ssh-設置)
+6. [日常維運](#6-日常維運)
+
+---
+
+## 1. Directus CMS 首次部署
+
+### 1.1 在 Dokploy 創建 Compose service
+
+- Project：`ai-news`
+- 類型：**Compose**
+- Source：本倉庫 git，分支 `main`
+- **Compose Path**：`ai-news/docker-compose.prod.yml`
+
+### 1.2 環境變量（Dokploy → Environment）
+
+```
+# Directus
+DIRECTUS_KEY=<openssl rand -base64 32>
+DIRECTUS_SECRET=<openssl rand -base64 32>
+PUBLIC_URL=https://cms.epochtimesnw.com
+POSTGRES_USER=directus
+POSTGRES_PASSWORD=<strong password>
+POSTGRES_DB=directus
+ADMIN_EMAIL=...
+ADMIN_PASSWORD=...
+ARTICLES_SERVICE_ROLE_IDS=          # 第 1.5 步填
+
+# Authentik OIDC
+OIDC_CLIENT_ID=...
+OIDC_CLIENT_SECRET=...
+OIDC_ISSUER_URL=...
+DIRECTUS_DEFAULT_ROLE_ID=...        # editor role UUID
+
+# hermes-agent（見第 2 節）
+HERMES_DIRECTUS_URL=https://cms.epochtimesnw.com
+HERMES_DIRECTUS_TOKEN=...
+GATEWAY_BASE_URL=http://<tailscale-ip>:8317/v1
+GATEWAY_API_KEY=...
+JINA_API_KEY=jina_...
+RELAY_URLS=http://100.97.116.16:8082   # 見第 4 節
+```
+
+### 1.3 配域名
+
+- Host：`cms.epochtimesnw.com`，Container Port：**8055**，HTTPS 開
+
+### 1.4 部署並套用 Schema
+
+```bash
+# 首次部署後跑 bootstrap（在能訪問公網的機器上）
+DIRECTUS_URL=https://cms.epochtimesnw.com ADMIN_EMAIL=... ADMIN_PASSWORD=... \
+  node bootstrap/schema.mjs
+node bootstrap/add-m2m.mjs
+node bootstrap/permissions.mjs   # 輸出 SERVICE ROLE ID
+```
+
+### 1.5 填入 SERVICE ROLE ID
+
+把 `permissions.mjs` 輸出的 UUID 填回 Dokploy 的 `ARTICLES_SERVICE_ROLE_IDS`，然後重新 Deploy。
+
+### 1.6 驗收
+
+跑 `ACCEPTANCE.md` 裡的行為測試（狀態機、去重、immutable field）。
+
+---
+
+## 2. hermes-agent 環境變量
+
+hermes-agent 用 `network_mode: host`（需要 Tailscale 訪問 Claude 閘道）。
+
+| 變量 | 說明 | 示例 |
+|------|------|------|
+| `HERMES_DIRECTUS_URL` | Directus 公網域名 | `https://cms.epochtimesnw.com` |
+| `HERMES_DIRECTUS_TOKEN` | service account static token | 在 Directus 後台生成 |
+| `GATEWAY_BASE_URL` | Claude 閘道 Tailscale 地址 | `http://100.97.116.16:8317/v1` |
+| `GATEWAY_API_KEY` | 閘道 API key | |
+| `MODEL_DEEP` | Lane A 模型 | `claude-sonnet-4-6` |
+| `MODEL_SHORT` | Lane B 模型 | `claude-haiku-4-5-20251001` |
+| `JINA_API_KEY` | Jina Reader key（減少封鎖） | `jina_...` |
+| `FETCHER_URL` | fetcher-service 地址 | `http://localhost:8081`（固定） |
+| `RELAY_URLS` | 住宅 relay 節點（逗號分隔） | `http://100.97.116.16:8082` |
+| `DAILY_TOKEN_BUDGET` | 每日 Claude token 上限 | `500000` |
+| `MAX_PER_RUN` | 每次 cron 最多發布篇數 | `8` |
+| `CRON_HIGH` | Lane A 觸發頻率 | `*/10 * * * *` |
+| `CRON_LOW` | Lane B 觸發頻率 | `0 8 * * *` |
+
+---
+
+## 3. fetcher-service — Reddit Auth 設置
+
+fetcher-service 是給 hermes-agent 取 Reddit 全文用的 Python 服務，同樣用 `network_mode: host`。
+
+### 3.1 後端選擇
+
+| 環境 | 後端 | 說明 |
+|------|------|------|
+| 本地 Mac | `opencli` | 複用 Chrome 登錄態，安裝 Chrome 擴充即可 |
+| OVH 容器 | `rdt-cli` | Cookie 文件 auth，無頭運行 |
+
+### 3.2 本地 Mac 設置（一次性）
+
+```bash
+# 安裝 agent-reach 和 rdt-cli
+pip3 install "git+https://github.com/Panniantong/Agent-Reach.git" --break-system-packages
+python3 -m agent_reach.cli install --channels=reddit
+
+# 安裝 OpenCLI Chrome 擴充（手動，用於本地測試）
+# 下載：https://github.com/jackwener/opencli/releases → opencli-extension-*.zip
+# Chrome → chrome://extensions/ → 開發者模式 → 載入未封裝
+
+# 驗證
+opencli doctor
+```
+
+### 3.3 OVH Reddit Auth（一次性，本地操作）
+
+```bash
+# 在本地 Mac 上：從 Chrome 自動提取 Reddit session
+export PATH="$PATH:/Users/$(whoami)/.local/bin"
+pipx install "git+https://github.com/public-clis/rdt-cli.git@5e4fb3720d5c174e976cd425ccc3b879d52cac66"
+rdt login         # 輸出「Already authenticated」即成功
+rdt status --json # 確認 authenticated: true, username: Guitang
+
+# 同步 credential 到 OVH（Tailscale SSH）
+ssh ubuntu@ovh-prod-eet "mkdir -p /home/ubuntu/fetcher-auth/rdt-cli"
+rsync -avz ~/.config/rdt-cli/ ubuntu@ovh-prod-eet:/home/ubuntu/fetcher-auth/rdt-cli/
+```
+
+### 3.4 Auth 路徑說明
+
+OVH 上的 bind mount：
+```
+主機路徑: /home/ubuntu/fetcher-auth/rdt-cli/credential.json
+容器路徑: /root/.config/rdt-cli/credential.json
+```
+
+Reddit session cookie 有效期約 1 年。到期後重跑 3.3。
+
+### 3.5 驗證
+
+```bash
+# 在 OVH 上
+curl http://localhost:8081/health
+curl "http://localhost:8081/check?platform=reddit"
+```
+
+---
+
+## 4. fetch-relay — 住宅 IP 節點
+
+當 Jina Reader 被目標網站封鎖時，fetcher-service 自動 fallback 到住宅 IP relay 節點（通過 Tailscale tailnet 訪問）。
+
+### 4.1 現有節點
+
+| 主機名 | Tailscale IP | 狀態 |
+|--------|-------------|------|
+| `seattle-eet-lenovo-product` | 100.97.116.16 | ✅ 運行中 |
+
+### 4.2 在新機器上安裝 relay（Linux + Tailscale）
+
+```bash
+# 確保機器已加入 Tailscale tailnet
+tailscale ip -4   # 確認有 IP
+
+# 複製 relay.py 和 install.sh 到機器上，然後：
+sudo bash ai-news/fetch-relay/install.sh
+```
+
+install.sh 會：
+1. 把 `relay.py` 裝到 `/opt/fetch-relay/`
+2. 創建 systemd 服務，開機自啟
+3. 只監聽 Tailscale IP（公網不可達）
+
+### 4.3 添加新節點到 fetcher-service
+
+在 Dokploy 的 `RELAY_URLS` 環境變量裡追加（逗號分隔）：
+
+```
+RELAY_URLS=http://100.97.116.16:8082,http://<新節點-tailscale-hostname>:8082
+```
+
+也可以用 Tailscale hostname 代替 IP（hostname 更穩定）：
+
+```
+RELAY_URLS=http://seattle-eet-lenovo-product:8082,http://friend1-laptop:8082
+```
+
+### 4.4 Fallback 順序
+
+```
+hermes-agent 請求文章全文
+  → fetcher-service
+      1. Jina Reader（有 key，OVH Datacenter IP）
+      2. RELAY_URLS[0]（Lenovo，西雅圖住宅 IP）
+      3. RELAY_URLS[1]（朋友節點）
+      4. ...
+      → 全部失敗 → 502，pipeline 記錄 fetch-fail 等下輪重試
+```
+
+---
+
+## 5. Tailscale SSH 設置
+
+### 5.1 ACL 配置
+
+在 `https://login.tailscale.com/admin/acls` 的 `ssh` 區塊：
+
+```json
+"ssh": [
+  {
+    "action": "accept",
+    "src": ["autogroup:member"],
+    "dst": ["tag:prod"],
+    "users": ["root", "ubuntu"]
+  }
+]
+```
+
+- OVH 的 Tailscale tag 是 `tag:prod`
+- `autogroup:member` = tailnet 所有成員設備
+
+### 5.2 常用連接
+
+```bash
+ssh ubuntu@ovh-prod-eet          # OVH VPS
+ssh root@seattle-eet-lenovo-product   # Lenovo 桌機
+```
+
+---
+
+## 6. 日常維運
+
+### 查看日誌
+
+```bash
+ssh ubuntu@ovh-prod-eet
+docker logs ainews-directus-c7rvvp-hermes-agent-1 --tail 50 -f
+docker logs ainews-directus-c7rvvp-directus-1 --tail 50 -f
+```
+
+### 手動觸發 hermes-agent
+
+```bash
+docker exec ainews-directus-c7rvvp-hermes-agent-1 node dist/index.js once
+```
+
+### fetcher-service 診斷
+
+```bash
+curl http://localhost:8081/health
+curl "http://localhost:8081/check?platform=reddit"
+```
+
+### Reddit Cookie 過期後刷新
+
+```bash
+# 本地 Mac
+rdt login
+rsync -avz ~/.config/rdt-cli/ ubuntu@ovh-prod-eet:/home/ubuntu/fetcher-auth/rdt-cli/
+ssh ubuntu@ovh-prod-eet "docker restart ainews-directus-c7rvvp-fetcher-service-1 2>/dev/null || true"
+```
+
+### fetch-relay 狀態檢查
+
+```bash
+# 從 OVH 確認各節點可達
+curl http://100.97.116.16:8082/health
+# curl http://<其他節點>:8082/health
+```
+
+### Schema 更新
+
+```bash
+# 本地生成快照
+DIRECTUS_URL=https://cms.epochtimesnw.com ADMIN_EMAIL=... ADMIN_PASSWORD=... \
+  npx directus schema snapshot snapshots/$(date +%Y%m%d)-schema.yaml
+
+# 套用到生產
+docker exec <directus-container> npx directus schema apply --yes /path/snapshot.yaml
+```
