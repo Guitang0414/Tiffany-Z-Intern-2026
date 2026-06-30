@@ -1,15 +1,14 @@
 <script setup lang="ts">
 import { inject, ref, computed, type Ref } from 'vue';
-import { useApi, useStores } from '@directus/extensions-sdk';
+import { useApi } from '@directus/extensions-sdk';
 
 // Directus 用 prop 传 primaryKey;再兜底 inject,确保拿得到 id
 const props = defineProps<{ primaryKey?: string | number }>();
 const injPk = inject<Ref<string | number> | string | number>('primaryKey', '');
 
 const api = useApi();
-const { useNotificationsStore } = useStores();
-const notifications = useNotificationsStore();
 const values = inject<Ref<Record<string, any>>>('values', ref({}));
+const errorMessage = ref('');
 
 const pk = computed<string | number>(() => {
 	if (props.primaryKey != null && props.primaryKey !== '') return props.primaryKey;
@@ -37,12 +36,7 @@ async function patch(payload: Record<string, any>) {
 	await api.patch(`/items/articles/${pk.value}`, payload);
 }
 function fail(e: any) {
-	notifications.add({
-		title: '操作失败',
-		text: e?.response?.data?.errors?.[0]?.message ?? String(e),
-		type: 'error',
-		dialog: true,
-	});
+	errorMessage.value = e?.response?.data?.errors?.[0]?.message ?? String(e);
 }
 
 // 保存并发布:正文编辑 + status=PUBLISHING 原子提交,回列表
@@ -52,7 +46,6 @@ async function publish() {
 	try {
 		// spike 简化:发布时盖发布时间戳(正式上线由 n8n 在真正发到 WP 时写)
 		await patch({ ...editablePayload(), status: 'PUBLISHING', published_at: new Date().toISOString() });
-		notifications.add({ title: '已保存并发布' });
 		window.location.assign(listUrl());
 	} catch (e) {
 		fail(e);
@@ -67,7 +60,6 @@ async function reject() {
 	busy.value = true;
 	try {
 		await patch({ status: 'REJECTED', rejection_reason: reason.value.trim() });
-		notifications.add({ title: '已驳回' });
 		window.location.assign(listUrl());
 	} catch (e) {
 		fail(e);
@@ -80,6 +72,7 @@ async function reject() {
 
 <template>
 	<div class="review-actions">
+		<v-notice v-if="errorMessage" type="danger" style="margin-bottom:8px;width:100%">{{ errorMessage }}</v-notice>
 		<v-button :loading="busy" :disabled="isNew" @click="publish">
 			<v-icon name="check_circle" left /> 保存并发布
 		</v-button>
