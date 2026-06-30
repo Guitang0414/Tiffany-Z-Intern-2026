@@ -18,8 +18,6 @@ const pk = computed<string | number>(() => {
 const isNew = computed(() => !pk.value || pk.value === '+');
 
 const busy = ref(false);
-const rejectOpen = ref(false);
-const reason = ref('');
 
 function listUrl() {
 	return window.location.href.split('/content/articles')[0] + '/content/articles';
@@ -54,18 +52,17 @@ async function publish() {
 	}
 }
 
-// 驳回:status=REJECTED + 原因,回列表
+// 驳回:status=REJECTED,回列表(无需理由,一键操作)
 async function reject() {
-	if (!(reason.value ?? '').trim() || isNew.value) return;
+	if (isNew.value) return;
 	busy.value = true;
 	try {
-		await patch({ status: 'REJECTED', rejection_reason: (reason.value ?? '').trim() });
+		await patch({ status: 'REJECTED' });
 		window.location.assign(listUrl());
 	} catch (e) {
 		fail(e);
 	} finally {
 		busy.value = false;
-		rejectOpen.value = false;
 	}
 }
 </script>
@@ -76,24 +73,9 @@ async function reject() {
 		<v-button :loading="busy" :disabled="isNew" @click="publish">
 			<v-icon name="check_circle" left /> 保存并发布
 		</v-button>
-		<v-button kind="danger" :loading="busy" :disabled="isNew" @click="rejectOpen = true">
+		<v-button kind="danger" :loading="busy" :disabled="isNew" @click="reject">
 			<v-icon name="cancel" left /> 驳回
 		</v-button>
-
-		<v-dialog v-model="rejectOpen" @esc="rejectOpen = false">
-			<v-card>
-				<v-card-title>驳回原因</v-card-title>
-				<v-card-text>
-					<v-textarea v-model="reason" placeholder="为什么驳回这篇文章?" />
-				</v-card-text>
-				<v-card-actions>
-					<v-button secondary @click="rejectOpen = false">取消</v-button>
-					<v-button kind="danger" :disabled="!(reason ?? '').trim()" :loading="busy" @click="reject">
-						确认驳回
-					</v-button>
-				</v-card-actions>
-			</v-card>
-		</v-dialog>
 	</div>
 </template>
 

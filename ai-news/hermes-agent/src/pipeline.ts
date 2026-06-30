@@ -3,7 +3,7 @@
 import { discover } from './sources';
 import { fetchFullText, fetchViaAgentReach, RetryableError } from './fetcher';
 import { rewrite } from './claude';
-import { ensureCategory, postArticle, type PostResult } from './publisher';
+import { ensureCategory, postArticle, postManualReview, type PostResult } from './publisher';
 import { isDuplicate } from './dedupe';
 import { isNewsworthy } from './selector';
 import { retryStore } from './retryStore';
@@ -16,6 +16,18 @@ const lg = log('pipeline');
 
 async function publish(lead: Lead, rw: Rewritten, category: string, sourceText?: string): Promise<PostResult> {
 	return postArticle(lead, rw, await ensureCategory(category), sourceText);
+}
+
+/** 改写失败/不合格 → 入库打 manual_intervention_required,而不是只存本地缓存(编辑看不到)。
+ *  Directus 写入本身失败(网络/权限)时才退回本地缓存,留到下一轮(reprocessPending 不会重发这类 manual,
+ *  所以只是兜底防丢,不会自动重试 —— agent 重启日志能看到 manual_review 计数提醒去查)。 */
+async function flagManualReview(lead: Lead, reason: string, sourceText: string, draft?: { title?: string; content?: string }): Promise<void> {
+	try {
+		await postManualReview(lead, await ensureCategory(lead.defaultCategory), reason, sourceText, draft);
+	} catch (err) {
+		lg.error({ url: lead.sourceUrl, err: (err as Error).message }, 'manual-review directus post failed — caching locally');
+		retryStore.saveManualReview(lead, `${reason} (directus post also failed: ${(err as Error).message})`);
+	}
 }
 
 /** 先重发上轮没写成功的(D2)。 */
@@ -77,24 +89,24 @@ async function processLead(lead: Lead): Promise<LeadResult> {
 		budget.add(out.usage.totalTokens);
 		rw = out.rewritten;
 	} catch (err) {
-		retryStore.saveManualReview(lead, `rewrite: ${(err as Error).message}`);
+		await flagManualReview(lead, `rewrite: ${(err as Error).message}`, text);
 		return 'manual';
 	}
 	if (!rw.title || !rw.content) {
-		retryStore.saveManualReview(lead, 'rewrite parse empty');
+		await flagManualReview(lead, 'rewrite parse empty', text);
 		return 'manual';
 	}
 	// 取不到/截斷正文時模型會寫「內容缺失/無從獲取/不在已知資訊」這類元說明 → 別建成文章
 	// 正則同時覆蓋簡體與繁體，避免切換語言後漏判。
 	if (/截[断斷]|[内內]容缺失|[无無][从從](获取|獲取|[确確][认認]|知[晓曉]|得知)|不在已知[信資][息訊]|已知[信資][息訊]之[内內]|不得而知|未能.{0,8}([呈][现現]|提供|[获獲]取|[加载]|[載]入|[核][实實])|[无無][法].{0,10}([撰][写寫]|[核][实實]|[报報][道]|[进進]一步|完整|[呈][现現]|[获獲]取)|([访訪]问|查看|[参參][见見]|[详詳][见見]|[请請]看|前往).{0,12}原文|[获獲]取完整[报報][道]|原文([链鏈][接]|[网網][址])/.test(rw.content)) {
-		retryStore.saveManualReview(lead, 'source unavailable/truncated (model wrote a meta-disclaimer)');
+		await flagManualReview(lead, 'source unavailable/truncated (model wrote a meta-disclaimer)', text, rw);
 		return 'manual';
 	}
 	// 确定性兜底:改写太短 = 取材不足/失败,不够格当文章(不靠穷举措辞)
 	const minLen = lead.contentType === 'ARTICLE' ? 400 : 120;
 	const bodyLen = rw.content.replace(/\s/g, '').length;
 	if (bodyLen < minLen) {
-		retryStore.saveManualReview(lead, `content too short (${bodyLen} chars for ${lead.contentType})`);
+		await flagManualReview(lead, `content too short (${bodyLen} chars for ${lead.contentType})`, text, rw);
 		return 'manual';
 	}
 

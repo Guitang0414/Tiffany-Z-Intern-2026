@@ -52,3 +52,43 @@ export async function postArticle(lead: Lead, rw: Rewritten, categoryId: string,
 	lg.error({ status: res.status, body: txt.slice(0, 200) }, 'post failed');
 	throw new Error(`directus ${res.status}: ${txt.slice(0, 160)}`);
 }
+
+/**
+ * 改写失败/内容不合格(取材失败、模型报错、太短等)→ 仍然入库,打 manual_intervention_required=true,
+ * 让编辑在「需人工审查」视图里看到并手动撰写/驳回,而不是悄悄丢在 agent 本地缓存里。
+ * ai_title/ai_content 优先用模型已产出的草稿(哪怕不合格),没有就退回原始素材,方便编辑直接改。
+ * manual_intervention_required 不在 SERVICE_CREATE 权限里(同 wp_/tweet_ 字段写法)→ 建完后单独 PATCH。
+ */
+export async function postManualReview(
+	lead: Lead,
+	categoryId: string,
+	reason: string,
+	sourceText: string,
+	draft?: { title?: string; content?: string },
+): Promise<PostResult> {
+	const body = {
+		source_url: lead.sourceUrl,
+		source_title: lead.sourceTitle,
+		source_content: sourceText || lead.rssContent || null,
+		source_site: lead.sourceSite,
+		source_published_at: lead.sourcePublishedAt ?? null,
+		ai_title: draft?.title || lead.sourceTitle,
+		ai_content: draft?.content || sourceText || lead.rssContent || '(取材失败,需编辑手动撰写)',
+		ai_summary: `[需人工审查] ${reason}`.slice(0, 280),
+		content_type: lead.contentType,
+		category_id: categoryId,
+	};
+	const res = await fetch(`${config.DIRECTUS_URL}/items/articles`, { method: 'POST', headers, body: JSON.stringify(body) });
+	if (!res.ok) {
+		const txt = await res.text();
+		if ((res.status === 400 || res.status === 422) && /unique/i.test(txt)) return 'duplicate';
+		lg.error({ status: res.status, body: txt.slice(0, 200) }, 'manual-review post failed');
+		throw new Error(`directus ${res.status}: ${txt.slice(0, 160)}`);
+	}
+	const created = (await res.json()).data as { id: string };
+	const flagRes = await fetch(`${config.DIRECTUS_URL}/items/articles/${created.id}`, {
+		method: 'PATCH', headers, body: JSON.stringify({ manual_intervention_required: true }),
+	});
+	if (!flagRes.ok) lg.warn({ id: created.id, status: flagRes.status }, 'failed to set manual_intervention_required');
+	return 'created';
+}
