@@ -126,8 +126,8 @@ services:
       JINA_API_KEY: ${JINA_API_KEY}
       JINA_MIN_INTERVAL_MS: "1500"
       FETCHER_URL: "http://localhost:8081"             # fetcher-service (host network)
-      CRON_HIGH: "*/10 * * * *"
-      CRON_LOW: "0 8 * * *"
+      CRON_HIGH: ${CRON_HIGH:-0 */2 * * *}
+      CRON_LOW: ${CRON_LOW:-0 8 * * *}
       TZ: America/Los_Angeles
       DAILY_TOKEN_BUDGET: ${DAILY_TOKEN_BUDGET:-2000000}
       SQLITE_PATH: /app/cache/hermes.db
