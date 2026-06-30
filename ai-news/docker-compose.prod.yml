@@ -42,16 +42,24 @@ services:
 
       LOG_LEVEL: info
 
-      # --- Authentik OIDC (Phase 2) — uncomment + fill once mentor provides the app ---
-      # AUTH_PROVIDERS: authentik
-      # AUTH_AUTHENTIK_DRIVER: openid
-      # AUTH_AUTHENTIK_CLIENT_ID: ${OIDC_CLIENT_ID}
-      # AUTH_AUTHENTIK_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
-      # AUTH_AUTHENTIK_ISSUER_URL: ${OIDC_ISSUER_URL} # https://auth.epochtimesnw.com/application/o/directus-cms/
-      # AUTH_AUTHENTIK_IDENTIFIER_KEY: email
-      # AUTH_AUTHENTIK_ALLOW_PUBLIC_REGISTRATION: "false"
-      # AUTH_AUTHENTIK_DEFAULT_ROLE_ID: ${DIRECTUS_DEFAULT_ROLE_ID}
-      # AUTH_AUTHENTIK_SCOPE: "openid profile email"
+      # Force SSO-only login: disable the default email/password provider so the only way in
+      # is "Log In with Authentik". Local admin password can no longer log in via the UI
+      # (break-glass = container CLI `directus users passwd`, or temporarily unset this).
+      # SAFE ONLY because real admins are promoted to Administrator on their Authentik accounts.
+      AUTH_DISABLE_DEFAULT: "true"
+
+      # --- Authentik OIDC (enabled) — roles assigned in Directus (Route B: no Authentik groups) ---
+      AUTH_PROVIDERS: authentik
+      AUTH_AUTHENTIK_DRIVER: openid
+      AUTH_AUTHENTIK_CLIENT_ID: ${OIDC_CLIENT_ID}
+      AUTH_AUTHENTIK_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+      AUTH_AUTHENTIK_ISSUER_URL: ${OIDC_ISSUER_URL}
+      AUTH_AUTHENTIK_IDENTIFIER_KEY: email
+      # Route B: auto-create SSO users as the default role (editor); promote admins by hand
+      # in Directus. WHO may log in is gated by Authentik's app-access policy (mentor's side).
+      AUTH_AUTHENTIK_ALLOW_PUBLIC_REGISTRATION: "true"
+      AUTH_AUTHENTIK_DEFAULT_ROLE_ID: ${DIRECTUS_DEFAULT_ROLE_ID}
+      AUTH_AUTHENTIK_SCOPE: "openid profile email"
     volumes:
       - directus_uploads:/directus/uploads
     expose:
@@ -76,9 +84,63 @@ services:
       retries: 5
       start_period: 30s
 
+  # fetcher-service：Agent-Reach HTTP wrapper，供 hermes-agent 取 Reddit/Twitter 全文。
+  # network_mode: host — 與 hermes-agent 共用主機網路，hermes-agent 透過 localhost:8081 呼叫。
+  # auth 目錄從主機 bind mount；用 Tailscale rsync 同步本地帳號設定（見 DEPLOY.md §fetcher-service）。
+  fetcher-service:
+    build:
+      context: ./fetcher-service
+    restart: unless-stopped
+    network_mode: host   # 與 hermes-agent 同一 host 網路，uvicorn 監聽 127.0.0.1:8081
+    environment:
+      JINA_API_KEY: ${JINA_API_KEY:-}
+      # Residential relay nodes via Tailscale — comma-separated.
+      # Add each node after running fetch-relay/install.sh on that machine.
+      # Example: http://seattle-eet-lenovo-product:8082,http://friend1:8082
+      RELAY_URLS: ${RELAY_URLS:-}
+    volumes:
+      # Bind mount for auth state — rsync from local Mac via Tailscale.
+      # rdt-cli stores config under ~/.config/rdt/; rsync target on OVH: /home/ubuntu/fetcher-auth/
+      - /home/ubuntu/fetcher-auth:/root/.config
+
+  # 内部 worker:自带 cron 抓新闻 → 改写 → POST Directus(PENDING)。不暴露端口/域名。
+  hermes-agent:
+    build:
+      context: ./hermes-agent
+    restart: unless-stopped
+    depends_on:
+      - directus
+      - fetcher-service
+    # ⚠️ Claude 网关在 Tailscale 上,容器默认进不了 tailnet。OVH 主机已在 tailnet,
+    #    故用 host 网络让容器共享主机 tailnet(GATEWAY_BASE_URL 用 tailnet IP)。
+    #    代价:不在 compose 网络里 → Directus 走公网域名(HERMES_DIRECTUS_URL)。
+    #    备选:Tailscale sidecar(需 TS_AUTHKEY)。见 hermes-agent/README.md。
+    network_mode: host
+    environment:
+      DIRECTUS_URL: ${HERMES_DIRECTUS_URL}            # 公网域名,如 https://cms.epochtimesnw.com
+      DIRECTUS_TOKEN: ${HERMES_DIRECTUS_TOKEN}         # service 账号 token(禁用 admin)
+      GATEWAY_BASE_URL: ${GATEWAY_BASE_URL}            # tailnet,如 http://100.97.116.16:8317/v1
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY}
+      MODEL_DEEP: ${MODEL_DEEP:-claude-sonnet-4-6}
+      MODEL_SHORT: ${MODEL_SHORT:-claude-haiku-4-5-20251001}
+      JINA_API_KEY: ${JINA_API_KEY}
+      JINA_MIN_INTERVAL_MS: "1500"
+      FETCHER_URL: "http://localhost:8081"             # fetcher-service (host network)
+      CRON_HIGH: "*/10 * * * *"
+      CRON_LOW: "0 8 * * *"
+      TZ: America/Los_Angeles
+      DAILY_TOKEN_BUDGET: "500000"
+      SQLITE_PATH: /app/cache/hermes.db
+      MAX_PER_RUN: "8"
+      LOG_LEVEL: info
+      NODE_ENV: production
+    volumes:
+      - hermes_cache:/app/cache
+
 volumes:
   directus_uploads:
   directus_pg_data:
+  hermes_cache:
 
 networks:
   dokploy-network:
