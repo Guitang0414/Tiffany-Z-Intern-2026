@@ -56,10 +56,10 @@ async function publish() {
 
 // 驳回:status=REJECTED + 原因,回列表
 async function reject() {
-	if (!reason.value.trim() || isNew.value) return;
+	if (!(reason.value ?? '').trim() || isNew.value) return;
 	busy.value = true;
 	try {
-		await patch({ status: 'REJECTED', rejection_reason: reason.value.trim() });
+		await patch({ status: 'REJECTED', rejection_reason: (reason.value ?? '').trim() });
 		window.location.assign(listUrl());
 	} catch (e) {
 		fail(e);
@@ -88,7 +88,7 @@ async function reject() {
 				</v-card-text>
 				<v-card-actions>
 					<v-button secondary @click="rejectOpen = false">取消</v-button>
-					<v-button kind="danger" :disabled="!reason.trim()" :loading="busy" @click="reject">
+					<v-button kind="danger" :disabled="!(reason ?? '').trim()" :loading="busy" @click="reject">
 						确认驳回
 					</v-button>
 				</v-card-actions>
