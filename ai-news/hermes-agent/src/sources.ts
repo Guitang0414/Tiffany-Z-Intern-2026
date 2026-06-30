@@ -19,6 +19,8 @@ export const SOURCES: SourceFeed[] = [
 	{ name: 'Port of Seattle', url: 'https://www.portseattle.org/rss.xml', lane: 'A', contentType: 'ARTICLE', defaultCategory: 'Local', fetchMode: 'jina' },
 	{ name: 'WSDOT', url: 'https://wsdot.wa.gov/rss.xml', lane: 'A', contentType: 'ARTICLE', defaultCategory: 'Local', fetchMode: 'jina' },
 	{ name: 'WA DOH', url: 'https://doh.wa.gov/rss.xml', lane: 'A', contentType: 'ARTICLE', defaultCategory: 'Local', fetchMode: 'jina' },
+	{ name: 'The Urbanist', url: 'https://www.theurbanist.org/feed/', lane: 'A', contentType: 'ARTICLE', defaultCategory: 'Housing & Urban', fetchMode: 'jina' },
+	{ name: 'Publicola', url: 'https://publicola.com/feed/', lane: 'A', contentType: 'ARTICLE', defaultCategory: 'Politics', fetchMode: 'jina' },
 
 	// Lane B — 熱點短訊。
 	// fetchMode: 'agent-reach' → fetcher-service 用 rdt-cli 取帖子全文（需 Reddit auth）。
