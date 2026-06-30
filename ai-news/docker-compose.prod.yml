@@ -94,6 +94,10 @@ services:
     network_mode: host   # 與 hermes-agent 同一 host 網路，uvicorn 監聽 127.0.0.1:8081
     environment:
       JINA_API_KEY: ${JINA_API_KEY:-}
+      # Residential relay nodes via Tailscale — comma-separated.
+      # Add each node after running fetch-relay/install.sh on that machine.
+      # Example: http://seattle-eet-lenovo-product:8082,http://friend1:8082
+      RELAY_URLS: ${RELAY_URLS:-}
     volumes:
       # Bind mount for auth state — rsync from local Mac via Tailscale.
       # rdt-cli stores config under ~/.config/rdt/; rsync target on OVH: /home/ubuntu/fetcher-auth/

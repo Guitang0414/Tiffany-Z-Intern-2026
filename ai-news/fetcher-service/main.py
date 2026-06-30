@@ -1,24 +1,26 @@
 """
-fetcher-service — CLI wrapper for Reddit/Twitter full-text fetch.
+fetcher-service — CLI wrapper for Reddit/Twitter full-text fetch + residential relay fallback.
 
 Backend routing:
   Reddit local (Mac):  opencli reddit read <url>   (reuses browser login)
   Reddit server (OVH): rdt read <url>              (cookie-file auth)
   Twitter:             opencli twitter read <url>  (future)
-  Web fallback:        Jina Reader
+  Web:                 1. Jina Reader (OVH IP, has API key)
+                       2. Residential relay nodes (via Tailscale, RELAY_URLS env)
 
 POST /fetch   {url, platform}  → {text, platform}
-GET  /health                   → {status}
+GET  /health                   → {status, relays}
 GET  /check?platform=reddit    → {platform, status, backend, message}
 
 hermes-agent (network_mode: host) calls this at http://localhost:8081.
-Reddit auth on OVH: rsync ~/.config/rdt-cli/ to /home/ubuntu/fetcher-auth/rdt-cli/ then
-bind-mount /home/ubuntu/fetcher-auth:/root/.config (see DEPLOY.md §fetcher-service).
+Reddit auth: bind-mount /home/ubuntu/fetcher-auth:/root/.config (see DEPLOY.md).
+Relay nodes: set RELAY_URLS=http://host1:8082,http://host2:8082 (Tailscale hostnames/IPs).
 """
 import asyncio
 import os
 import shutil
 import subprocess
+import urllib.error
 import urllib.request
 from typing import Literal
 
@@ -28,6 +30,14 @@ from pydantic import BaseModel
 app = FastAPI()
 
 JINA_API_KEY = os.environ.get("JINA_API_KEY", "")
+
+# Comma-separated list of residential relay endpoints (Tailscale hostnames or IPs).
+# Example: http://seattle-eet-lenovo-product:8082,http://friend1-laptop:8082
+_RELAY_URLS: list[str] = [
+    u.strip().rstrip("/")
+    for u in os.environ.get("RELAY_URLS", "").split(",")
+    if u.strip()
+]
 
 
 # ---- backend detection ----
@@ -51,7 +61,7 @@ class FetchRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "relays": len(_RELAY_URLS), "relay_hosts": _RELAY_URLS}
 
 
 @app.get("/check")
@@ -154,7 +164,8 @@ def _fetch_twitter_sync(url: str) -> str:
 
 
 def _fetch_jina(url: str) -> str:
-    """Jina Reader fallback — same behaviour as hermes-agent fetcher.ts."""
+    """Jina Reader — tries Jina first, then residential relay nodes on failure."""
+    # 1. Jina Reader
     jina_url = f"https://r.jina.ai/{url}"
     headers = {
         "User-Agent": "fetcher-service/0.1",
@@ -166,6 +177,43 @@ def _fetch_jina(url: str) -> str:
     try:
         req = urllib.request.Request(jina_url, headers=headers)
         with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.read().decode("utf-8")[:8000]
-    except Exception as e:
-        raise HTTPException(502, f"Jina fetch failed: {e}") from e
+            text = resp.read().decode("utf-8")[:8000]
+        if len(text.strip()) >= 200:
+            return text
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            raise HTTPException(429, "Jina rate-limited") from e
+        # other HTTP errors → try relays
+    except Exception:
+        pass  # network error → try relays
+
+    # 2. Residential relay nodes (Tailscale, tried in order)
+    return _fetch_via_relay(url)
+
+
+def _fetch_via_relay(url: str) -> str:
+    """Try each residential relay in order; raise 502 if all fail."""
+    if not _RELAY_URLS:
+        raise HTTPException(502, f"Jina failed and no relay nodes configured (set RELAY_URLS)")
+
+    last_err = ""
+    for relay in _RELAY_URLS:
+        try:
+            payload = f'{{"url": "{url}"}}'.encode()
+            req = urllib.request.Request(
+                f"{relay}/fetch",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=35) as resp:
+                data = __import__("json").loads(resp.read())
+            text = data.get("text", "")
+            if text and len(text.strip()) >= 200:
+                return text
+            last_err = f"relay {relay} returned thin content"
+        except Exception as e:
+            last_err = f"relay {relay} error: {e}"
+            continue
+
+    raise HTTPException(502, f"all relays failed — last error: {last_err}")
