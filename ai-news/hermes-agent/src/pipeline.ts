@@ -14,8 +14,8 @@ import type { Lane, Lead, Rewritten } from './types';
 
 const lg = log('pipeline');
 
-async function publish(lead: Lead, rw: Rewritten, category: string): Promise<PostResult> {
-	return postArticle(lead, rw, await ensureCategory(category));
+async function publish(lead: Lead, rw: Rewritten, category: string, sourceText?: string): Promise<PostResult> {
+	return postArticle(lead, rw, await ensureCategory(category), sourceText);
 }
 
 /** 先重发上轮没写成功的(D2)。 */
@@ -99,7 +99,7 @@ async function processLead(lead: Lead): Promise<LeadResult> {
 	}
 
 	try {
-		return await publish(lead, rw, lead.defaultCategory);
+		return await publish(lead, rw, lead.defaultCategory, text);
 	} catch (err) {
 		retryStore.savePending(lead, rw, lead.defaultCategory, (err as Error).message); // 改写没丢,下轮重发
 		return 'post-deferred';

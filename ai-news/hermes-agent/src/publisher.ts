@@ -31,11 +31,11 @@ export async function ensureCategory(name: string): Promise<string> {
 export type PostResult = 'created' | 'duplicate';
 
 /** 创建一篇 PENDING 文章。422-unique → duplicate;其它错误抛出(由 pipeline 决定重试)。 */
-export async function postArticle(lead: Lead, rw: Rewritten, categoryId: string): Promise<PostResult> {
+export async function postArticle(lead: Lead, rw: Rewritten, categoryId: string, sourceText?: string): Promise<PostResult> {
 	const body = {
 		source_url: lead.sourceUrl,
 		source_title: lead.sourceTitle,
-		source_content: lead.rssContent || null,
+		source_content: sourceText || lead.rssContent || null,
 		source_site: lead.sourceSite,
 		source_published_at: lead.sourcePublishedAt ?? null,
 		ai_title: rw.title,
