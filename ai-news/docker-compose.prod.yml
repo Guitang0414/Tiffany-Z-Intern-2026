@@ -129,9 +129,9 @@ services:
       CRON_HIGH: "*/10 * * * *"
       CRON_LOW: "0 8 * * *"
       TZ: America/Los_Angeles
-      DAILY_TOKEN_BUDGET: "500000"
+      DAILY_TOKEN_BUDGET: ${DAILY_TOKEN_BUDGET:-2000000}
       SQLITE_PATH: /app/cache/hermes.db
-      MAX_PER_RUN: "8"
+      MAX_PER_RUN: ${MAX_PER_RUN:-8}
       LOG_LEVEL: info
       NODE_ENV: production
     volumes:
