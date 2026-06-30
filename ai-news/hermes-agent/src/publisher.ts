@@ -35,6 +35,7 @@ export async function postArticle(lead: Lead, rw: Rewritten, categoryId: string)
 	const body = {
 		source_url: lead.sourceUrl,
 		source_title: lead.sourceTitle,
+		source_content: lead.rssContent || null,
 		source_site: lead.sourceSite,
 		source_published_at: lead.sourcePublishedAt ?? null,
 		ai_title: rw.title,
