@@ -18,6 +18,7 @@ const pk = computed<string | number>(() => {
 const isNew = computed(() => !pk.value || pk.value === '+');
 
 const busy = ref(false);
+const copied = ref(false);
 
 function listUrl() {
 	return window.location.href.split('/content/articles')[0] + '/content/articles';
@@ -65,6 +66,22 @@ async function reject() {
 		busy.value = false;
 	}
 }
+
+// 复制到 BrightChat:BrightChat 无开放 API,只能人工转发 —— 这里省的是「去几个字段里分别选字复制」
+// 的功夫,一键把标题+正文拼成能直接粘贴的文本。不改变文章状态,可以在发布前后任意时候点。
+async function copyForBrightChat() {
+	const v = values.value || {};
+	const title = (v.final_title ?? '').toString().trim();
+	const content = (v.final_content ?? '').toString().trim();
+	const text = [title, content].filter(Boolean).join('\n\n');
+	try {
+		await navigator.clipboard.writeText(text);
+		copied.value = true;
+		setTimeout(() => { copied.value = false; }, 3000);
+	} catch (e) {
+		fail(e);
+	}
+}
 </script>
 
 <template>
@@ -75,6 +92,9 @@ async function reject() {
 		</v-button>
 		<v-button kind="danger" :loading="busy" :disabled="isNew" @click="reject">
 			<v-icon name="cancel" left /> 驳回
+		</v-button>
+		<v-button secondary :disabled="isNew" @click="copyForBrightChat">
+			<v-icon :name="copied ? 'check' : 'content_copy'" left /> {{ copied ? '已复制' : '复制到 BrightChat' }}
 		</v-button>
 	</div>
 </template>
