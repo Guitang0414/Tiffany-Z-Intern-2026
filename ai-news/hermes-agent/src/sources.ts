@@ -55,6 +55,7 @@ async function discoverOne(src: SourceFeed): Promise<Lead[]> {
 					contentType: src.contentType,
 					defaultCategory: src.defaultCategory,
 					fetchMode: src.fetchMode,
+					platform: src.platform,
 					rssContent: (it.contentSnippet || (it as Record<string, unknown>).content || '').toString().slice(0, 4000),
 				};
 			})
