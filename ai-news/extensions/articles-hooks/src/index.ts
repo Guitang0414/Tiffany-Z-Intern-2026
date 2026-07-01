@@ -68,9 +68,16 @@ export default defineHook(({ filter }) => {
       fail(`Invalid status value: ${JSON.stringify(newStatus)}`, 400);
     }
 
-    // Load current rows to know the source state + content_type.
-    const rows: Array<{ id: string | number; status: string; content_type: string | null }> =
-      await context.database('articles').whereIn('id', keys).select('id', 'status', 'content_type');
+    // Load current rows to know the source state + content_type + a title snapshot for the audit log.
+    const rows: Array<{ id: string | number; status: string; content_type: string | null; final_title: string | null; ai_title: string | null }> =
+      await context.database('articles').whereIn('id', keys).select('id', 'status', 'content_type', 'final_title', 'ai_title');
+
+    // Resolve once per request: actor's email snapshot (service actions have no user -> null).
+    let actorEmail: string | null = null;
+    if (context.accountability?.user) {
+      const u = await context.database('directus_users').where('id', context.accountability.user).select('email').first();
+      actorEmail = u?.email ?? null;
+    }
 
     for (const row of rows) {
       const from = row.status as Status;
@@ -92,6 +99,23 @@ export default defineHook(({ filter }) => {
       if (isHumanApproval(from, newStatus as Status, actor) && context.accountability?.user) {
         payload.reviewed_by = context.accountability.user;
       }
+
+      // Audit trail: one immutable row per legal transition. Written here (not by the client)
+      // so editor/service tokens — which have no create/update permission on this collection —
+      // can never forge or edit history. article_title/actor_email are point-in-time snapshots
+      // so the log stays readable even if the article or user is later deleted.
+      await context.database('article_audit_log').insert({
+        id: crypto.randomUUID(),
+        article: row.id,
+        article_title: row.final_title ?? row.ai_title ?? null,
+        from_status: from,
+        to_status: newStatus,
+        actor_role: actor,
+        actor_user: context.accountability?.user ?? null,
+        actor_email: actorEmail,
+        reason: typeof payload.rejection_reason === 'string' ? payload.rejection_reason : null,
+        created_at: new Date().toISOString(),
+      });
     }
 
     return payload;

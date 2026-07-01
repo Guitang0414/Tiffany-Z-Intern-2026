@@ -228,6 +228,37 @@ async function run() {
   await ensureField('articles', f.dateCreated());
   await ensureField('articles', f.dateUpdated());
 
+  // === article_audit_log =====================================================
+  // 只由 articles-hooks(beforeUpdate)通过 context.database 原始写入 —— 没有任何角色
+  // 被授予对这张表的 create/update 权限(见 permissions.mjs / audit-log-permissions.mjs),
+  // 客户端(editor/service token)无法伪造或篡改历史。article_title/actor_email 是写入时
+  // 的快照,即使原文章或用户之后被删除,审计记录仍然可读。
+  await ensureCollection('article_audit_log', { icon: 'history', note: '审批状态变更审计日志(只读,hook 写入)' });
+  await ensureField('article_audit_log', f.fk('article')); // -> articles, SET NULL on delete
+  await ensureField('article_audit_log', f.string('article_title', { len: 500 }));
+  await ensureField('article_audit_log', f.string('from_status', { len: 20 }));
+  await ensureField('article_audit_log', f.string('to_status', { len: 20 }));
+  await ensureField('article_audit_log', f.string('actor_role', { len: 20 })); // editor / admin / service
+  await ensureField('article_audit_log', f.fk('actor_user')); // -> directus_users, SET NULL on delete
+  await ensureField('article_audit_log', f.string('actor_email', { len: 255 }));
+  await ensureField('article_audit_log', f.text('reason'));
+  await ensureField('article_audit_log', f.dateCreated());
+
+  await ensureRelation({
+    collection: 'article_audit_log',
+    field: 'article',
+    related_collection: 'articles',
+    meta: {},
+    schema: { on_delete: 'SET NULL' },
+  });
+  await ensureRelation({
+    collection: 'article_audit_log',
+    field: 'actor_user',
+    related_collection: 'directus_users',
+    meta: {},
+    schema: { on_delete: 'SET NULL' },
+  });
+
   // === relations ============================================================
   await ensureRelation({
     collection: 'articles',

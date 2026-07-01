@@ -23,14 +23,21 @@ Node 18+ (uses built-in `fetch`). No npm install needed.
 - `articles`: full `source_* / ai_* / final_*` field families, `status`, `content_type`,
   `reviewed_by`, `published_at`, `manual_intervention_required`, per-platform `wp_*` / `tweet_*`,
   `category_id`, timestamps
-- relations: `articles.category_id → categories`, `articles.reviewed_by → directus_users`
+- `article_audit_log`: immutable status-transition history — `article` (FK), `article_title`
+  (snapshot), `from_status`, `to_status`, `actor_role`, `actor_user` (FK), `actor_email`
+  (snapshot), `reason`, `created_at`. Written exclusively by the articles-hooks extension via
+  raw DB access — no role has create/update permission on this collection via the API, so
+  editor/service tokens can never forge or edit history.
+- relations: `articles.category_id → categories`, `articles.reviewed_by → directus_users`,
+  `article_audit_log.article → articles`, `article_audit_log.actor_user → directus_users`
 
-## The other two bootstrap scripts (run after schema.mjs)
+## The other bootstrap scripts (run after schema.mjs)
 
 ```bash
-node add-m2m.mjs       # directus_users.assigned_categories M2M -> categories
-node permissions.mjs   # editor/service roles + field/item permissions (§4.1.9)
-                       # prints the SERVICE role id -> put it in ARTICLES_SERVICE_ROLE_IDS, then recreate directus
+node add-m2m.mjs                  # directus_users.assigned_categories M2M -> categories
+node permissions.mjs              # editor/service roles + field/item permissions (§4.1.9)
+                                  # prints the SERVICE role id -> put it in ARTICLES_SERVICE_ROLE_IDS, then recreate directus
+node audit-log-permissions.mjs    # editor read-only access to article_audit_log (run once, after permissions.mjs)
 ```
 
 - `add-m2m.mjs` — adds the M2M so editors can be assigned categories.
@@ -39,6 +46,7 @@ node permissions.mjs   # editor/service roles + field/item permissions (§4.1.9)
   - `service` role (Agent + n8n): create `source_*` / `ai_*` / `category_id`; write back `wp_*` / `tweet_*` / `status`.
   - DEV-ONLY test users: `editor@example.com` / `editor123` (assigned Politics) and `agent@example.com` (static token `svc-static-token-123`).
   - **After running, set `ARTICLES_SERVICE_ROLE_IDS` = the printed service role id and recreate directus**, else the hooks treat the Agent/n8n token as an editor and block its writebacks.
+- `audit-log-permissions.mjs` — grants the `editor` role **read-only** access to `article_audit_log`, scoped to `article.category_id ∈ assigned_categories` (same scope as `articles`). Separate script because `permissions.mjs` no-ops once the `editor` role already exists. No role ever gets write access — only the hook writes this table.
 
 > ⚠️ **`directus schema snapshot` does NOT capture roles / policies / permissions / users** — those live in `directus_*` data tables, not the schema. So **`permissions.mjs` is the source of truth for access control** (re-run it on a fresh instance), the same way the snapshot is for the schema. On a fresh instance: `schema apply` (snapshot) → `add-m2m.mjs` → `permissions.mjs`.
 
