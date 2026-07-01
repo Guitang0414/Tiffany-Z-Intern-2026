@@ -3,7 +3,10 @@ fetcher-service — CLI wrapper for Reddit/Twitter full-text fetch + residential
 
 Backend routing:
   Reddit local (Mac):  opencli reddit read <url>   (reuses browser login)
-  Reddit server (OVH): rdt read <url>              (cookie-file auth)
+  Reddit server (OVH): rdt read <url>              (cookie-file auth, via SOCKS5 proxy —
+                       Reddit blocks OVH's datacenter IP at the API layer; rdt-cli's httpx
+                       client is routed through reddit-socks-tunnel.service on the OVH host,
+                       an SSH -D tunnel to a residential IP. See REDDIT_PROXY_URL below.)
   Twitter:             opencli twitter read <url>  (future)
   Web:                 1. Jina Reader (OVH IP, has API key)
                        2. Residential relay nodes (via Tailscale, RELAY_URLS env)
@@ -39,6 +42,12 @@ _RELAY_URLS: list[str] = [
     if u.strip()
 ]
 
+# SOCKS5 proxy for rdt-cli only (Reddit blocks OVH's datacenter IP at the API layer).
+# Tunnels through reddit-socks-tunnel.service on the OVH host (SSH -D to Lenovo's
+# residential IP); rdt-cli's httpx client picks this up via HTTPS_PROXY (trust_env=True).
+# Set to "" to disable (rdt-cli then calls Reddit directly from OVH's IP).
+_REDDIT_PROXY = os.environ.get("REDDIT_PROXY_URL", "socks5h://127.0.0.1:1080")
+
 
 # ---- backend detection ----
 
@@ -48,6 +57,16 @@ def _have_opencli() -> bool:
 
 def _have_rdt() -> bool:
     return shutil.which("rdt") is not None
+
+
+def _rdt_env() -> dict[str, str]:
+    """rdt-cli's httpx client is trust_env=True, so it picks up HTTPS_PROXY automatically.
+    Scoped to this subprocess only — Jina/relay requests elsewhere in this file are unaffected."""
+    env = dict(os.environ)
+    if _REDDIT_PROXY:
+        env["HTTPS_PROXY"] = _REDDIT_PROXY
+        env["HTTP_PROXY"] = _REDDIT_PROXY
+    return env
 
 
 # ---- request model ----
@@ -73,7 +92,7 @@ def check(platform: str = "reddit"):
         if _have_rdt():
             # Quick auth check
             r = subprocess.run(["rdt", "status", "--json"],
-                               capture_output=True, text=True, timeout=10)
+                               capture_output=True, text=True, timeout=10, env=_rdt_env())
             import json
             try:
                 data = json.loads(r.stdout or "")
@@ -140,7 +159,7 @@ def _rdt_read(url: str) -> str:
     # Try both command forms (rdt-cli versions differ)
     for cmd in [["rdt", "read", url], ["rdt", "post", url]]:
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=_rdt_env())
         except subprocess.TimeoutExpired:
             raise HTTPException(504, "rdt-cli timed out")
         if r.returncode == 0 and (r.stdout or "").strip():

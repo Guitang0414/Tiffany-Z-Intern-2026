@@ -160,6 +160,60 @@ curl http://localhost:8081/health
 curl "http://localhost:8081/check?platform=reddit"
 ```
 
+### 3.6 Reddit 封 OVH IP — SOCKS5 代理走住宅 IP
+
+Credential 沒問題也會遇到 `authenticated: false, error: "Access forbidden: Resource"`——
+Reddit 在 API 層直接封鎖了 OVH 機房 IP（跟 South Seattle Emerald / PSBJ 被封是同一類問題）。
+同一份 credential 在本地 Mac 測試是通的，證明不是帳號問題。
+
+解法：`rdt-cli` 底層用 `httpx.Client()`（`trust_env=True`），會自動讀 `HTTPS_PROXY` 環境變量，
+不用改它的代碼。讓 fetcher-service 只把 Reddit 請求透過 SSH SOCKS5 隧道經 Lenovo 的住宅 IP
+出去：
+
+**前提：Tailscale ACL 要開一條 OVH → Lenovo 的 SSH 規則**（Lenovo 是個人設備，不是 tag，
+需要先在 Tailscale admin → Machines 把 Lenovo 打上一個 tag，比如 `tag:relay`，`tagOwners`
+裡也要加這個 tag，然後 ACL `ssh` 陣列裡加）：
+```json
+{
+  "action": "accept",
+  "src": ["tag:prod"],
+  "dst": ["tag:relay"],
+  "users": ["root"]
+}
+```
+（`dst` 不接受裸 IP / MagicDNS 主機名，只認 tag/group/身份，這是踩過的坑。）
+
+**OVH host 上建常駐 SOCKS5 隧道**（systemd，不是在容器裡跑）：
+```bash
+sudo tee /etc/systemd/system/reddit-socks-tunnel.service > /dev/null <<'EOF'
+[Unit]
+Description=SOCKS5 tunnel to Lenovo residential IP (for fetcher-service Reddit reads)
+After=network.target tailscaled.service
+Wants=tailscaled.service
+
+[Service]
+ExecStart=/usr/bin/ssh -N -D 127.0.0.1:1080 -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new root@seattle-eet-lenovo-product
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now reddit-socks-tunnel.service
+sudo systemctl status reddit-socks-tunnel.service --no-pager
+```
+
+`fetcher-service` 用 `network_mode: host`，容器內直接能打到 `127.0.0.1:1080`，不用額外配網路。
+`main.py` 只給 `rdt` 這個 subprocess 注入 `HTTPS_PROXY=socks5h://127.0.0.1:1080`（見
+`REDDIT_PROXY_URL` 環境變量，預設就是這個地址），不影響 Jina/relay 的請求。
+
+驗證：
+```bash
+curl "http://localhost:8081/check?platform=reddit"   # authenticated 應變 true
+```
+
 ---
 
 ## 4. fetch-relay — 住宅 IP 節點
