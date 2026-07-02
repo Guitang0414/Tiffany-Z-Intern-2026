@@ -214,6 +214,28 @@ sudo systemctl status reddit-socks-tunnel.service --no-pager
 curl "http://localhost:8081/check?platform=reddit"   # authenticated 應變 true
 ```
 
+**⚠️ 已知結果：SOCKS5 代理沒有解決問題。** 隧道本身工作正常（`ifconfig.me` 驗證流量真的
+從 Lenovo 出去），但 `rdt-cli` 打 Reddit 的 `/api/v1/me` 驗證請求，經住宅 IP（IPv4/IPv6
+都試過）依然拿到 Reddit 自己出的「請驗證」攔截頁（403，非防火牆層級的阻擋，是 Reddit 應用層
+的反機器人判定）。直接訪問 `www.reddit.com/` 首頁是通的（200），只有帶 cookie 的 API 請求
+被攔——推測是 TLS 指紋（`httpx` 的 TLS handshake 跟真實瀏覽器不一樣）和/或 session 地點異常
+（cookie 是在別的 IP/裝置上建立的，突然從陌生住宅 IP 用非瀏覽器客戶端發請求，觸發風控）。
+**換 IP 本身大概率解不了這個問題**，SOCKS5 隧道保留著（對其他用途仍有用），但不指望它能修好
+Reddit 全文抓取。
+
+**下一步嘗試過、暫時擱置**:在 Lenovo 上搭了 `opencli`（瀏覽器擴充驅動真實 Chrome，理論上
+有真實 TLS 指紋，比 `rdt-cli` 更有機會繞過風控）——建了專用非 root 帳號 `opencli-bot`、
+Xvfb 虛擬 display、Chrome + opencli 擴充，都是常駐 systemd 服務（`opencli-xvfb.service` /
+`opencli-chrome.service`，跑在 Lenovo 上）。卡在擴充載入了但沒跟本地 daemon 建立 WebSocket
+連線，還沒查出根因。這套基礎設施留著沒拆（成本低），但沒有接到 `fetcher-service`，目前不影響
+線上流程。如果之後想撿起來:比起繼續在無頭環境裡除錯，更有希望的路是用 VNC 連上 Lenovo 的
+虛擬 display，直接在那台機器上手動、真實地登入一次 Reddit（讓 session 從一開始就「誕生」在
+這個住宅 IP，而不是從 Mac 搬過去的），直接對症「地點異常」這個風控判斷。
+
+**現狀（不算故障）**:Reddit 全文抓不到時，pipeline 已經有設計好的降級——自動退回 RSS 摘要
+（`fetcher.ts` 的 `fetchViaAgentReach` 失敗 → `pipeline.ts` 用 `lead.rssContent`），Lane B
+照常出稿，只是內容比全文薄。
+
 ---
 
 ## 4. fetch-relay — 住宅 IP 節點
